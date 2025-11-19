@@ -39,34 +39,36 @@
 
 ## Architecture
 
-// TODO : edit this diagram
-
 ```mermaid
-graph TD
-    A[Bantheon] --> B[React]
-    A --> C[TailwindCSS]
-    A --> D[React Router]
-    A --> E[React Query]
-    A --> F[React Context]
-    A --> G[Axios]
-    A --> H[Heroicons]
-    A --> I[React Hook Form]
-    A --> J[Zod]
-    A --> K[ESLint]
-    A --> L[Prettier]
-    A --> M[TypeScript]
-    A --> N[Vite]
-    A --> O[Nginx]
-    A --> P[Docker]
-    A --> Q[OpenStack]
-    A --> R[Prometheus]
-    A --> S[Grafana]
-    A --> T[Loki]
-    A --> U[Nginx]
-    A --> V[Docker]
-    A --> W[OpenStack]
-    A --> X[Prometheus]
-    A --> Y[Grafana]
+graph TB
+    subgraph "Bantheon - Web Frontend"
+        CLIENT[Client Application<br/>Landing Page]
+        ADMIN[Admin Dashboard<br/>Management UI]
+    end
+    
+    subgraph "BNGdrasil Backend Services"
+        BIFROST[Bifrost<br/>API Gateway<br/>:8000]
+        BIDAR[Bidar<br/>Auth Server<br/>:8001]
+    end
+    
+    subgraph "Infrastructure"
+        NGINX[Nginx<br/>Reverse Proxy]
+        OCI[Oracle Cloud<br/>Infrastructure]
+    end
+    
+    CLIENT --> NGINX
+    ADMIN --> NGINX
+    NGINX --> BIFROST
+    NGINX --> BIDAR
+    BIFROST --> OCI
+    BIDAR --> OCI
+    
+    style CLIENT fill:#3b82f6
+    style ADMIN fill:#8b5cf6
+    style BIFROST fill:#10b981
+    style BIDAR fill:#f59e0b
+    style NGINX fill:#ef4444
+    style OCI fill:#64748b
 ```
 
 ---
@@ -111,15 +113,14 @@ graph TD
 - [**Bifrost API Gateway**](https://github.com/BNGdrasil/Bifrost) (http://localhost:8000)
 - [**Bidar Auth Server**](https://github.com/BNGdrasil/Bidar) (http://localhost:8001)
 
-### Installation and Execution
+### Client Application (Landing Page)
 
 ```bash
+# navigate to client directory
+cd client
+
 # install dependencies
 npm install
-
-# set environment variables
-cp .env.example .env
-# check/modify API server URL in .env file
 
 # start development server
 npm run dev
@@ -127,98 +128,131 @@ npm run dev
 # access http://localhost:3000 in browser
 ```
 
+### Admin Dashboard
+
+```bash
+# navigate to admin directory
+cd admin
+
+# install dependencies
+npm install
+
+# start development server
+npm run dev
+
+# access http://localhost:5174 in browser
+```
+
 ### Build and Deploy
 
 ```bash
-# production build
+# build client application
+cd client
 npm run build
 
-# built files are created in dist/ directory
+# build admin dashboard
+cd ../admin
+npm run build
 
-# run with Docker (optional)
-docker build -t bantheon .
-docker run -p 3000:3000 bantheon
+# built files are created in each dist/ directory
+# deliver dists to VM1 manually
 ```
 
 ---
 
 ## Project Structure
 
-// TODO : edit this structure
-
 ```
-src/
-├── 
+bantheon/
+├── client/                       # Main client application (landing page)
+│   ├── src/
+│   │   ├── App.tsx              # Main application component (landing page)
+│   │   ├── main.tsx             # Application entry point
+│   │   ├── index.css            # Global styles
+│   │   ├── assets/              # Static assets
+│   │   ├── types/               # TypeScript type definitions
+│   │   │   └── index.ts
+│   │   └── vite-env.d.ts        # Vite environment types
+│   ├── dist/                    # Production build output
+│   ├── package.json
+│   ├── vite.config.ts          # Vite configuration
+│   ├── tsconfig.json           # TypeScript configuration
+│   └── index.html              # HTML entry point
+│
+├── admin/                       # Admin dashboard application
+│   ├── src/
+│   │   ├── App.tsx             # Admin app component
+│   │   ├── main.tsx            # Entry point
+│   │   ├── index.css           # Global styles
+│   │   ├── components/
+│   │   │   └── Layout.tsx      # Admin layout with sidebar
+│   │   ├── pages/
+│   │   │   ├── LoginPage.tsx
+│   │   │   ├── DashboardPage.tsx
+│   │   │   ├── UsersPage.tsx
+│   │   │   ├── ServicesPage.tsx
+│   │   │   ├── LogsPage.tsx
+│   │   │   └── SettingsPage.tsx
+│   │   ├── contexts/
+│   │   │   └── AuthContext.tsx
+│   │   └── services/
+│   │       └── api.ts
+│   ├── dist/                   # Production build output
+│   ├── package.json
+│   ├── vite.config.ts
+│   ├── tsconfig.json
+│   ├── env.example             # Environment variables example
+│   └── env.production          # Production environment variables
+│
+├── nginx/                      # Nginx reverse proxy configuration
+│   ├── nginx.conf
+│   └── DEPLOYMENT_GUIDE.md
+│
+├── docker-compose.yml          # Docker Compose configuration
+└── README.md                   # This file
 ```
 
 ---
 
 ## Main Configuration
 
-### Environment Variables (.env)
+### Client Application
+
+The client application is a simple landing page with no external dependencies or configuration required. It runs on port 3000 by default.
+
+### Admin Dashboard Environment Variables
+
+Create a `.env` file in the `admin/` directory based on `env.example`:
+
 ```bash
-# API server settings
-VITE_AUTH_API_URL=http://localhost:8001      # Bidar auth server
-VITE_GATEWAY_API_URL=http://localhost:8000   # Bifrost API gateway
+# API Base URL
+VITE_API_BASE_URL=https://api.bnbong.xyz
 
-# feature flags
-VITE_ENABLE_ADMIN=true                       # enable admin feature
-VITE_ENABLE_GAMES=true                       # enable games feature
-VITE_ENABLE_PORTFOLIO=true                   # enable portfolio feature
-```
-
-### API proxy settings (vite.config.ts)
-
-For CORS issues in development environment, this includes proxy settings to resolve them.
-
-```typescript
-server: {
-  proxy: {
-    '/api': 'http://localhost:8000',    # Bifrost proxy
-    '/auth': 'http://localhost:8001',   # Bidar proxy
-  },
-}
+# Admin API Base URL
+VITE_ADMIN_API_BASE_URL=https://api.bnbong.xyz/admin/api
 ```
 
 ---
 
 ## Authentication Flow
 
-1. **Login**: user inputs credentials in login form
-2. **Token Issuance**: Bidar server issues JWT access/refresh tokens
-3. **Token Storage**: tokens are stored in local storage
-4. **Automatic Authentication**: Axios interceptor automatically attaches tokens to all requests
-5. **Token Refresh**: automatically refreshed with refresh token when expired
-6. **Logout**: invalidates tokens and clears local storage
+### Admin Dashboard
 
-## Design System
+1. **Login**: Admin user authenticates via Bidar
+2. **JWT Token**: Access token stored in localStorage
+3. **Authorization**: All admin API requests include Bearer token
+4. **Auto Logout**: 401 errors trigger automatic logout
+5. **Permission Check**: 403 errors show permission denied message
 
-### Color Palette
+### Client Application
 
-- **Primary**: Blue (blue-600)
-- **Secondary**: Gray (gray-500~900)
-- **Success**: Green (green-500~600)
-- **Warning**: Yellow (yellow-500~600)  
-- **Error**: Red (red-500~600)
-
-### Component Classes
-
-- **Buttons**: `.btn-primary`, `.btn-secondary`, `.btn-outline`, `.btn-ghost`
-- **Inputs**: `.input`
-- **Cards**: `.card`, `.card-header`, `.card-content`, `.card-footer`
-
-### Responsive Breakpoints
-
-- **sm**: 640px+
-- **md**: 768px+
-- **lg**: 1024px+
-- **xl**: 1280px+
+The client application is a public landing page and does not require authentication.
 
 ---
 
 ## BNGdrasil Ecosystem
 
-Bifrost is part of the larger **[BNGdrasil](https://github.com/BNGdrasil)** cloud infrastructure project:
+Bantheon is part of the larger **[BNGdrasil](https://github.com/BNGdrasil)** cloud infrastructure project:
 
 - **🎨 [Bantheon](https://github.com/BNGdrasil/Bantheon)** - Web Frontend & Portfolio (this project)
 - **🌉 [Bifrost](https://github.com/BNGdrasil/Bifrost)** - API Gateway

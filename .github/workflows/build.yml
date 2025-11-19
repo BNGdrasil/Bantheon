@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main, dev ]
+  push:
+    branches: [ main, dev ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [client, admin]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: ${{ matrix.app }}/package-lock.json
+
+    - name: Install dependencies (${{ matrix.app }})
+      working-directory: ./${{ matrix.app }}
+      run: npm ci
+
+    - name: Build (${{ matrix.app }})
+      working-directory: ./${{ matrix.app }}
+      run: npm run build
+
+    - name: Upload build artifacts (${{ matrix.app }})
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.app }}-dist
+        path: ${{ matrix.app }}/dist/
+        retention-days: 30
+        if-no-files-found: error
