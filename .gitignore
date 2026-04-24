@@ -88,6 +88,3 @@ jspm_packages/
 # TernJS port file
 .tern-port
 
-# Package-lock
-package-lock.json
-yarn.lock
