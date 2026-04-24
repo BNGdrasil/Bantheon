@@ -1,7 +1,7 @@
 {
   "name": "bnbong-client",
   "version": "1.0.0",
-  "description": "Client application for bnbong.xyz",
+  "description": "Client application for bnbong.com",
   "private": true,
   "type": "module",
   "scripts": {

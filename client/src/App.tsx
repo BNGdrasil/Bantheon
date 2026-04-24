@@ -42,7 +42,7 @@ function App() {
           flexWrap: 'wrap',
         }}>
           <a
-            href="https://admin.bnbong.xyz"
+            href="https://admin.bnbong.com"
             style={{
               padding: '0.75rem 1.5rem',
               backgroundColor: '#3b82f6',
@@ -59,7 +59,7 @@ function App() {
           </a>
           
           <a
-            href="https://monitoring.bnbong.xyz"
+            href="https://monitoring.bnbong.com"
             style={{
               padding: '0.75rem 1.5rem',
               backgroundColor: '#8b5cf6',
@@ -76,7 +76,7 @@ function App() {
           </a>
           
           <a
-            href="https://api.bnbong.xyz/docs"
+            href="https://api.bnbong.com/docs"
             style={{
               padding: '0.75rem 1.5rem',
               backgroundColor: '#10b981',

@@ -226,10 +226,10 @@ Create a `.env` file in the `admin/` directory based on `env.example`:
 
 ```bash
 # API Base URL
-VITE_API_BASE_URL=https://api.bnbong.xyz
+VITE_API_BASE_URL=https://api.bnbong.com
 
 # Admin API Base URL
-VITE_ADMIN_API_BASE_URL=https://api.bnbong.xyz/admin/api
+VITE_ADMIN_API_BASE_URL=https://api.bnbong.com/admin/api
 ```
 
 ---
@@ -259,7 +259,6 @@ Bantheon is part of the larger **[BNGdrasil](https://github.com/BNGdrasil)** clo
 - **🔐 [Bidar](https://github.com/BNGdrasil/Bidar)** - Authentication & Authorization Server
 - **🏗️ [Baedalus](https://github.com/BNGdrasil/Baedalus)** - Infrastructure as Code (Terraform)
 - **🌐 [Bsgard](https://github.com/BNGdrasil/Bsgard)** - Custom VPC & Networking
-- **🎮 [Blysium](https://github.com/BNGdrasil/Blysium)** - Gaming Platform
 
 Each component is designed to work independently while integrating seamlessly with others.
 
