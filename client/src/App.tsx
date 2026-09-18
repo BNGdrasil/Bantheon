@@ -1,133 +1,142 @@
+/* ------------------------------------------------------------------ *
+ * Public landing page for bnbong.com.
+ *
+ * Static content only: no admin API call, no internal host name, no account
+ * count and no backup location. Every link points at a public entry point.
+ * ------------------------------------------------------------------ */
+
+const SERVICES = [
+  {
+    name: '운영 콘솔',
+    href: 'https://admin.bnbong.com',
+    host: 'admin.bnbong.com',
+    note: '등록된 서비스와 계정을 관리하는 화면입니다. 허가된 계정만 로그인할 수 있습니다.',
+  },
+  {
+    name: '모니터링',
+    href: 'https://monitoring.bnbong.com',
+    host: 'monitoring.bnbong.com',
+    note: '지표와 로그를 모아 보는 Grafana입니다. 별도 계정이 필요합니다.',
+  },
+  {
+    name: 'ambiw',
+    href: 'https://ambiw.bnbong.com',
+    host: 'ambiw.bnbong.com',
+    note: '개인 프로젝트로 운영 중인 서비스입니다.',
+  },
+  {
+    name: 'Overlock',
+    href: 'https://overlock.bnbong.com',
+    host: 'overlock.bnbong.com',
+    note: '개인 프로젝트로 운영 중인 서비스입니다.',
+  },
+]
+
+const PILLARS = [
+  {
+    name: 'API 게이트웨이',
+    note: '요청을 받아 각 서비스로 전달하고, 인증과 요청 제한을 한곳에서 처리합니다.',
+  },
+  {
+    name: '인증 서버',
+    note: '계정과 권한을 소유합니다. 토큰 발급과 검증이 여기서 이뤄집니다.',
+  },
+  {
+    name: '관측',
+    note: '지표와 로그를 모아 서비스 상태를 확인하고 변경 시점을 기록합니다.',
+  },
+]
+
+const STACK = ['FastAPI', 'PostgreSQL', 'React', 'Nginx', 'Prometheus', 'Grafana', 'Terraform', 'Oracle Cloud']
+
 function App() {
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      minHeight: '100vh',
-      backgroundColor: '#0f172a',
-      color: '#f1f5f9',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
-      padding: '20px',
-    }}>
-      <div style={{
-        maxWidth: '800px',
-        textAlign: 'center',
-      }}>
-        <h1 style={{
-          fontSize: '4rem',
-          fontWeight: 'bold',
-          marginBottom: '1rem',
-          background: 'linear-gradient(to right, #3b82f6, #8b5cf6)',
-          WebkitBackgroundClip: 'text',
-          WebkitTextFillColor: 'transparent',
-          backgroundClip: 'text',
-        }}>
-          Hello, World!
-        </h1>
-        
-        <p style={{
-          fontSize: '1.5rem',
-          marginBottom: '2rem',
-          color: '#94a3b8',
-        }}>
-          Welcome to BNGdrasil
-        </p>
-        
-        <div style={{
-          display: 'flex',
-          gap: '1rem',
-          justifyContent: 'center',
-          flexWrap: 'wrap',
-        }}>
-          <a
-            href="https://admin.bnbong.com"
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: '#3b82f6',
-              color: 'white',
-              textDecoration: 'none',
-              borderRadius: '0.5rem',
-              fontWeight: '600',
-              transition: 'background-color 0.2s',
-            }}
-            onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#2563eb'}
-            onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#3b82f6'}
-          >
-            Admin Dashboard
-          </a>
-          
-          <a
-            href="https://monitoring.bnbong.com"
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: '#8b5cf6',
-              color: 'white',
-              textDecoration: 'none',
-              borderRadius: '0.5rem',
-              fontWeight: '600',
-              transition: 'background-color 0.2s',
-            }}
-            onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#7c3aed'}
-            onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#8b5cf6'}
-          >
-            Monitoring
-          </a>
-          
-          <a
-            href="https://api.bnbong.com/docs"
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: '#10b981',
-              color: 'white',
-              textDecoration: 'none',
-              borderRadius: '0.5rem',
-              fontWeight: '600',
-              transition: 'background-color 0.2s',
-            }}
-            onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#059669'}
-            onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#10b981'}
-          >
-            API Docs
-          </a>
-        </div>
-        
-        <div style={{
-          marginTop: '3rem',
-          padding: '1.5rem',
-          backgroundColor: '#1e293b',
-          borderRadius: '0.75rem',
-          border: '1px solid #334155',
-        }}>
-          <h2 style={{
-            fontSize: '1.25rem',
-            fontWeight: '600',
-            marginBottom: '1rem',
-          }}>
-            🚀 BNGdrasil Infrastructure
-          </h2>
-          <p style={{
-            color: '#94a3b8',
-            fontSize: '0.95rem',
-            lineHeight: '1.6',
-          }}>
-            A multi-region, microservices-based cloud infrastructure built on Oracle Cloud Infrastructure (OCI).
+    <>
+      <a className="skip-link" href="#main">
+        본문으로 건너뛰기
+      </a>
+      <div className="page" id="main">
+        <header>
+          <p className="eyebrow">bnbong · personal cloud</p>
+          <h1 className="site-title">
+            작게 운영하는
             <br />
-            Powered by FastAPI, React, and modern DevOps practices.
+            개인 클라우드<span className="decor">.</span>
+          </h1>
+          <p className="lead">
+            BNGdrasil은 개인 프로젝트를 한 인프라 위에서 운영하기 위해 만든 환경입니다. 게이트웨이와
+            인증 서버를 공통으로 두고, 각 서비스는 그 뒤에서 독립적으로 동작합니다.
           </p>
-        </div>
-        
-        <footer style={{
-          marginTop: '3rem',
-          color: '#64748b',
-          fontSize: '0.875rem',
-        }}>
-          © 2025 bnbong. All rights reserved.
+          <div className="accent-bar" aria-hidden="true" />
+        </header>
+
+        <hr className="rule" />
+
+        <section aria-labelledby="services-heading">
+          <h2 className="section-title" id="services-heading">
+            공개 서비스
+          </h2>
+          <p className="section-lead">
+            아래 주소에서 각 서비스에 접근할 수 있습니다. 관리 화면과 모니터링은 권한이 있는 계정만
+            사용할 수 있습니다.
+          </p>
+          <ul className="card-grid">
+            {SERVICES.map((service) => (
+              <li key={service.host}>
+                <a className="card link-card" href={service.href}>
+                  <span className="card-name">{service.name}</span>
+                  <span className="card-note">
+                    {service.note}
+                  </span>
+                  <span className="card-host">
+                    {service.host}
+                  </span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <hr className="rule" />
+
+        <section aria-labelledby="structure-heading">
+          <h2 className="section-title" id="structure-heading">
+            구성
+          </h2>
+          <p className="section-lead">
+            공통 계층 세 가지가 서비스를 떠받칩니다. 세부 구성과 내부 주소는 공개하지 않습니다.
+          </p>
+          <ul className="card-grid">
+            {PILLARS.map((pillar) => (
+              <li className="card" key={pillar.name}>
+                <span className="card-name">{pillar.name}</span>
+                <p className="card-note">{pillar.note}</p>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <hr className="rule" />
+
+        <section aria-labelledby="stack-heading">
+          <h2 className="section-title" id="stack-heading">
+            사용 기술
+          </h2>
+          <ul className="stack-list">
+            {STACK.map((item) => (
+              <li className="chip" key={item}>
+                {item}
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <footer className="site-foot">
+          <p>bnbong · BNGdrasil</p>
         </footer>
       </div>
-    </div>
-  );
+    </>
+  )
 }
 
-export default App;
+export default App

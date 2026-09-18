@@ -6,13 +6,19 @@ on:
   push:
     branches: [ main, dev ]
 
+# Least privilege: the build only needs to read the repository.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         app: [client, admin]
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
@@ -20,7 +26,8 @@ jobs:
     - name: Setup Node.js
       uses: actions/setup-node@v6
       with:
-        node-version: '18'
+        # Node 18 reached end of life; 22 is the supported LTS line.
+        node-version: '22'
         cache: 'npm'
         cache-dependency-path: ${{ matrix.app }}/package-lock.json
 
@@ -32,10 +39,12 @@ jobs:
       working-directory: ./${{ matrix.app }}
       run: npm run build
 
+    # The artifact name carries the commit SHA so a static release can be
+    # identified and rolled back by revision instead of by build order.
     - name: Upload build artifacts (${{ matrix.app }})
       uses: actions/upload-artifact@v6
       with:
-        name: ${{ matrix.app }}-dist
+        name: ${{ matrix.app }}-dist-${{ github.sha }}
         path: ${{ matrix.app }}/dist/
         retention-days: 30
         if-no-files-found: error

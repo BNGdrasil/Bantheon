@@ -1,150 +1,79 @@
 import { useState, FormEvent } from 'react'
 import { useAuth } from '../contexts/AuthContext'
+import { loginErrorMessage } from '../services/api'
 
 function LoginPage() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
   const { login } = useAuth()
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault()
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault()
+    // Guard against a second submit while the first one is still running.
+    if (isSubmitting) {
+      return
+    }
     setError('')
-    setIsLoading(true)
+    setIsSubmitting(true)
 
     try {
       await login(username, password)
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Login failed')
+    } catch (err) {
+      setError(loginErrorMessage(err))
     } finally {
-      setIsLoading(false)
+      setIsSubmitting(false)
     }
   }
 
   return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      minHeight: '100vh',
-      backgroundColor: '#0f172a',
-    }}>
-      <div style={{
-        width: '100%',
-        maxWidth: '400px',
-        padding: '2rem',
-        backgroundColor: '#1e293b',
-        borderRadius: '0.75rem',
-        border: '1px solid #334155',
-      }}>
-        <h1 style={{
-          fontSize: '2rem',
-          fontWeight: 'bold',
-          marginBottom: '0.5rem',
-          textAlign: 'center',
-        }}>
-          BNGdrasil Admin
-        </h1>
-        <p style={{
-          color: '#94a3b8',
-          textAlign: 'center',
-          marginBottom: '2rem',
-        }}>
-          Sign in to your account
-        </p>
+    <div className="login-page">
+      <div className="login-card">
+        <p className="eyebrow">BNGdrasil</p>
+        <h1 className="login-title">운영 콘솔 로그인</h1>
+        <p className="page-lead">등록된 관리 계정으로만 접근할 수 있습니다.</p>
 
-        {error && (
-          <div style={{
-            padding: '0.75rem',
-            marginBottom: '1rem',
-            backgroundColor: '#7f1d1d',
-            border: '1px solid #991b1b',
-            borderRadius: '0.5rem',
-            color: '#fecaca',
-            fontSize: '0.875rem',
-          }}>
-            {error}
-          </div>
-        )}
+        <div role="alert" aria-live="assertive">
+          {error && (
+            <div className="panel panel--error login-error">
+              <p className="panel-title">로그인하지 못했습니다</p>
+              <div className="panel-body">{error}</div>
+            </div>
+          )}
+        </div>
 
-        <form onSubmit={handleSubmit}>
-          <div style={{ marginBottom: '1rem' }}>
-            <label style={{
-              display: 'block',
-              marginBottom: '0.5rem',
-              fontSize: '0.875rem',
-              fontWeight: '500',
-            }}>
-              Username
-            </label>
+        <form className="login-form" onSubmit={handleSubmit}>
+          <div className="field">
+            <label htmlFor="username">아이디</label>
             <input
+              id="username"
+              name="username"
               type="text"
+              autoComplete="username"
+              disabled={isSubmitting}
               value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              onChange={(event) => setUsername(event.target.value)}
               required
-              style={{
-                width: '100%',
-                padding: '0.75rem',
-                backgroundColor: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: '0.5rem',
-                color: '#f1f5f9',
-                fontSize: '1rem',
-              }}
             />
           </div>
 
-          <div style={{ marginBottom: '1.5rem' }}>
-            <label style={{
-              display: 'block',
-              marginBottom: '0.5rem',
-              fontSize: '0.875rem',
-              fontWeight: '500',
-            }}>
-              Password
-            </label>
+          <div className="field">
+            <label htmlFor="password">비밀번호</label>
             <input
+              id="password"
+              name="password"
               type="password"
+              autoComplete="current-password"
+              disabled={isSubmitting}
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(event) => setPassword(event.target.value)}
               required
-              style={{
-                width: '100%',
-                padding: '0.75rem',
-                backgroundColor: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: '0.5rem',
-                color: '#f1f5f9',
-                fontSize: '1rem',
-              }}
             />
           </div>
 
-          <button
-            type="submit"
-            disabled={isLoading}
-            style={{
-              width: '100%',
-              padding: '0.75rem',
-              backgroundColor: '#3b82f6',
-              color: 'white',
-              border: 'none',
-              borderRadius: '0.5rem',
-              fontSize: '1rem',
-              fontWeight: '600',
-              cursor: isLoading ? 'not-allowed' : 'pointer',
-              opacity: isLoading ? 0.7 : 1,
-              transition: 'background-color 0.2s',
-            }}
-            onMouseOver={(e) => {
-              if (!isLoading) e.currentTarget.style.backgroundColor = '#2563eb'
-            }}
-            onMouseOut={(e) => {
-              if (!isLoading) e.currentTarget.style.backgroundColor = '#3b82f6'
-            }}
-          >
-            {isLoading ? 'Signing in...' : 'Sign In'}
+          <button type="submit" className="btn btn--primary btn--block" disabled={isSubmitting}>
+            {isSubmitting ? '확인하는 중' : '로그인'}
           </button>
         </form>
       </div>
@@ -153,4 +82,3 @@ function LoginPage() {
 }
 
 export default LoginPage
-

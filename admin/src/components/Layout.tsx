@@ -1,116 +1,137 @@
-import { Outlet, Link, useLocation } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Outlet, Link, useLocation, Navigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
+import { LoadingPanel, NoticePanel } from './StatusPanel'
+
+const NAVIGATION = [
+  { name: '운영 개요', href: '/dashboard' },
+  { name: '서비스', href: '/services' },
+  { name: '사용자', href: '/users' },
+  { name: '관측', href: '/observability' },
+  { name: '운영 설정', href: '/settings' },
+]
+
+const ROLE_LABELS: Record<string, string> = {
+  user: '일반',
+  moderator: '중재자',
+  admin: '관리자',
+  super_admin: '최고 관리자',
+}
 
 function Layout() {
-  const { user, logout } = useAuth()
+  const { user, isLoading, isForbidden, authError, logout } = useAuth()
   const location = useLocation()
+  const [navOpen, setNavOpen] = useState(false)
 
-  if (!user) {
-    window.location.href = '/login'
-    return null
+  // Following a link should not leave the mobile menu covering the page.
+  useEffect(() => {
+    setNavOpen(false)
+  }, [location.pathname])
+
+  // Wait for the stored token to be checked before deciding where to send the
+  // visitor; redirecting while loading throws away a valid session on reload.
+  if (isLoading) {
+    return (
+      <div className="centered-notice">
+        <LoadingPanel message="세션을 확인하는 중입니다." />
+      </div>
+    )
   }
 
-  const navigation = [
-    { name: 'Dashboard', href: '/dashboard' },
-    { name: 'Users', href: '/users' },
-    { name: 'Services', href: '/services' },
-    { name: 'Logs', href: '/logs' },
-    { name: 'Settings', href: '/settings' },
-  ]
+  // 403 is not a redirect: the account is signed in but lacks admin permission.
+  if (!user && isForbidden) {
+    return (
+      <div className="centered-notice">
+        <NoticePanel
+          tone="warning"
+          title="관리자 권한이 필요합니다"
+          actions={
+            <button type="button" className="btn" onClick={logout}>
+              로그아웃
+            </button>
+          }
+        >
+          <p>로그인은 되어 있으나 이 계정에는 관리 화면 권한이 없습니다.</p>
+        </NoticePanel>
+      </div>
+    )
+  }
+
+  if (!user && authError) {
+    return (
+      <div className="centered-notice">
+        <NoticePanel tone="error" title="세션을 확인하지 못했습니다">
+          <p>{authError}</p>
+        </NoticePanel>
+      </div>
+    )
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />
+  }
+
+  const roleLabel = ROLE_LABELS[user.role] || user.role
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh' }}>
-      {/* Sidebar */}
-      <aside style={{
-        width: '250px',
-        backgroundColor: '#1e293b',
-        borderRight: '1px solid #334155',
-        padding: '1.5rem',
-      }}>
-        <div style={{ marginBottom: '2rem' }}>
-          <h1 style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#3b82f6' }}>
-            BNGdrasil
-          </h1>
-          <p style={{ fontSize: '0.875rem', color: '#94a3b8' }}>Admin Dashboard</p>
-        </div>
-
-        <nav>
-          {navigation.map((item) => {
-            const isActive = location.pathname === item.href
-            return (
-              <Link
-                key={item.name}
-                to={item.href}
-                style={{
-                  display: 'block',
-                  padding: '0.75rem 1rem',
-                  marginBottom: '0.5rem',
-                  borderRadius: '0.5rem',
-                  textDecoration: 'none',
-                  backgroundColor: isActive ? '#3b82f6' : 'transparent',
-                  color: isActive ? 'white' : '#94a3b8',
-                  fontWeight: isActive ? '600' : '400',
-                  transition: 'all 0.2s',
-                }}
-                onMouseOver={(e) => {
-                  if (!isActive) e.currentTarget.style.backgroundColor = '#334155'
-                }}
-                onMouseOut={(e) => {
-                  if (!isActive) e.currentTarget.style.backgroundColor = 'transparent'
-                }}
-              >
-                {item.name}
-              </Link>
-            )
-          })}
-        </nav>
-
-        <div style={{
-          position: 'absolute',
-          bottom: '1.5rem',
-          left: '1.5rem',
-          right: '1.5rem',
-        }}>
-          <div style={{
-            padding: '1rem',
-            backgroundColor: '#334155',
-            borderRadius: '0.5rem',
-            marginBottom: '1rem',
-          }}>
-            <p style={{ fontSize: '0.875rem', color: '#94a3b8' }}>Logged in as</p>
-            <p style={{ fontWeight: '600', marginTop: '0.25rem' }}>{user.username}</p>
-            <p style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.25rem' }}>
-              Role: {user.role}
-            </p>
+    <>
+      <a className="skip-link" href="#main-content">
+        본문으로 건너뛰기
+      </a>
+      <div className="app-shell">
+        <aside className="app-sidebar">
+          <div className="sidebar-head">
+            <div>
+              <div className="brand">
+                BNGdrasil<span className="brand-dot" aria-hidden="true">.</span>
+              </div>
+              <div className="eyebrow">Operations console</div>
+            </div>
+            <button
+              type="button"
+              className="btn btn--sm nav-toggle"
+              onClick={() => setNavOpen((open) => !open)}
+              aria-expanded={navOpen}
+              aria-controls="primary-navigation"
+            >
+              {navOpen ? '메뉴 닫기' : '메뉴'}
+            </button>
           </div>
-          <button
-            onClick={logout}
-            style={{
-              width: '100%',
-              padding: '0.75rem',
-              backgroundColor: '#ef4444',
-              color: 'white',
-              border: 'none',
-              borderRadius: '0.5rem',
-              fontWeight: '600',
-              cursor: 'pointer',
-              transition: 'background-color 0.2s',
-            }}
-            onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#dc2626'}
-            onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#ef4444'}
-          >
-            Logout
-          </button>
-        </div>
-      </aside>
 
-      {/* Main content */}
-      <main style={{ flex: 1, padding: '2rem', overflowY: 'auto' }}>
-        <Outlet />
-      </main>
-    </div>
+          <nav
+            id="primary-navigation"
+            className="app-nav"
+            aria-label="주요 화면"
+            data-collapsed={navOpen ? 'false' : 'true'}
+          >
+            {NAVIGATION.map((item) => {
+              const isActive = location.pathname === item.href
+              return (
+                <Link key={item.href} to={item.href} aria-current={isActive ? 'page' : undefined}>
+                  {item.name}
+                </Link>
+              )
+            })}
+          </nav>
+
+          <div className="sidebar-foot" data-collapsed={navOpen ? 'false' : 'true'}>
+            <div className="account-card">
+              <p className="eyebrow">현재 계정</p>
+              <p className="account-name">{user.username}</p>
+              <p className="detail">역할 {roleLabel}</p>
+            </div>
+            <button type="button" className="btn btn--sm btn--block" onClick={logout}>
+              로그아웃
+            </button>
+          </div>
+        </aside>
+
+        <main id="main-content" className="app-main">
+          <Outlet />
+        </main>
+      </div>
+    </>
   )
 }
 
 export default Layout
-

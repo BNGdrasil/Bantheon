@@ -1,0 +1,234 @@
+name: CD (VM1 static)
+
+# client와 admin의 빌드 결과를 VM1의 정적 서비스 경로에 배포한다.
+# Nginx 컨테이너는 /opt/bnbong/<app>/dist 를 bind mount 하고 있고 mount 대상
+# 경로 자체는 바뀌지 않으므로, 배포에는 컨테이너 재시작이나 reload가 필요 없다.
+# Nginx 설정을 바꾸는 배포는 deploy-nginx.yml 이 따로 담당한다.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      apps:
+        description: '배포할 앱 목록 (쉼표로 구분)'
+        required: false
+        default: 'client,admin'
+      sha:
+        description: '롤백 대상 커밋 SHA (비우면 현재 커밋을 배포한다)'
+        required: false
+        default: ''
+
+# 워크플로는 저장소를 읽기만 한다. 배포 자체는 SSH 비밀값으로 수행한다.
+permissions:
+  contents: read
+
+jobs:
+  select:
+    name: Select apps and revision
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.plan.outputs.apps }}
+      sha: ${{ steps.plan.outputs.sha }}
+    steps:
+    - name: Resolve deployment plan
+      id: plan
+      env:
+        INPUT_APPS: ${{ github.event.inputs.apps }}
+        INPUT_SHA: ${{ github.event.inputs.sha }}
+        EVENT_SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+
+        apps="${INPUT_APPS:-client,admin}"
+        matrix='[]'
+        for app in ${apps//,/ }; do
+          case "$app" in
+            client|admin)
+              matrix="$(printf '%s' "$matrix" | jq -c --arg a "$app" '. + [$a]')"
+              ;;
+            '')
+              ;;
+            *)
+              echo "::error::지원하지 않는 app 이름입니다: $app"
+              exit 1
+              ;;
+          esac
+        done
+
+        if [ "$(printf '%s' "$matrix" | jq 'length')" -eq 0 ]; then
+          echo "::error::배포할 앱이 없습니다. apps 입력을 확인하시기 바랍니다."
+          exit 1
+        fi
+
+        # 롤백은 과거 아티팩트를 되살리지 않고 해당 커밋을 다시 빌드하는 방식이다.
+        # 아티팩트 보관 기간이 30일로 제한되어 있어 재현성이 더 높기 때문이다.
+        sha="${INPUT_SHA:-$EVENT_SHA}"
+
+        echo "apps=$matrix" >> "$GITHUB_OUTPUT"
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        echo "배포 대상: $matrix @ $sha"
+
+  build:
+    name: Build ${{ matrix.app }}
+    needs: select
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        app: ${{ fromJSON(needs.select.outputs.apps) }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+      with:
+        ref: ${{ needs.select.outputs.sha }}
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: '22'
+        cache: 'npm'
+        cache-dependency-path: ${{ matrix.app }}/package-lock.json
+
+    # admin의 VITE_* 값은 admin/env.production 이 정본이다. Vite는 production
+    # 모드에서 .env.production 만 읽으므로, 정본을 그 이름으로 복사한 뒤 필요한
+    # 변수가 모두 들어 있는지 확인한다. client에는 이 단계가 필요 없다.
+    - name: Prepare production env (admin)
+      if: matrix.app == 'admin'
+      working-directory: ./admin
+      run: |
+        set -euo pipefail
+        if [ ! -f env.production ]; then
+          echo "::error::admin/env.production 이 없습니다."
+          exit 1
+        fi
+        cp env.production .env.production
+        for key in VITE_API_BASE_URL VITE_ADMIN_API_BASE_URL VITE_GRAFANA_URL; do
+          if ! grep -qE "^${key}=.+" .env.production; then
+            echo "::error::admin/env.production 에 $key 값이 없습니다."
+            exit 1
+          fi
+        done
+        echo "admin/env.production 의 VITE_* 값을 사용합니다."
+        grep -E '^VITE_' .env.production
+
+    - name: Install dependencies (${{ matrix.app }})
+      working-directory: ./${{ matrix.app }}
+      run: npm ci
+
+    - name: Build (${{ matrix.app }})
+      working-directory: ./${{ matrix.app }}
+      run: npm run build
+
+    - name: Upload build artifacts (${{ matrix.app }})
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ matrix.app }}-dist-${{ needs.select.outputs.sha }}
+        path: ${{ matrix.app }}/dist/
+        retention-days: 30
+        if-no-files-found: error
+
+  deploy:
+    name: Deploy to VM1
+    needs: [select, build]
+    runs-on: ubuntu-latest
+    environment: production
+    # VM1의 같은 경로를 동시에 고치는 배포가 겹치지 않도록 직렬화한다.
+    # 진행 중인 배포를 중간에 끊으면 오히려 상태가 어긋나므로 취소하지 않는다.
+    concurrency:
+      group: vm1-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      DEPLOY_SHA: ${{ needs.select.outputs.sha }}
+      VM1_HOST: ${{ secrets.VM1_HOST }}
+
+    steps:
+    - name: Download build artifacts
+      uses: actions/download-artifact@v6
+      with:
+        pattern: '*-dist-${{ needs.select.outputs.sha }}'
+        path: artifacts
+
+    - name: Configure SSH
+      env:
+        SSH_PRIVATE_KEY: ${{ secrets.VM1_SSH_PRIVATE_KEY }}
+        SSH_KNOWN_HOSTS: ${{ secrets.VM1_SSH_KNOWN_HOSTS }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+        chmod 600 ~/.ssh/id_deploy
+        # known_hosts를 비밀값으로 고정해 두어야 중간자 공격을 막을 수 있다.
+        printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+        chmod 600 ~/.ssh/known_hosts
+
+    - name: Upload releases to VM1
+      run: |
+        set -euo pipefail
+        for app in $(echo '${{ needs.select.outputs.apps }}' | jq -r '.[]'); do
+          src="artifacts/${app}-dist-${DEPLOY_SHA}"
+          if [ ! -f "$src/index.html" ]; then
+            echo "::error::내려받은 아티팩트에 index.html 이 없습니다: $src"
+            exit 1
+          fi
+          remote_dir="/opt/bnbong/releases/${DEPLOY_SHA}/${app}"
+          echo "::group::upload $app"
+          # releases/ 는 최초 1회 준비 단계에서 ubuntu 소유로 만들어 두므로
+          # 디렉터리 생성에는 sudo가 필요하지 않다.
+          ssh -i ~/.ssh/id_deploy "ubuntu@${VM1_HOST}" "mkdir -p '$remote_dir'"
+          # 같은 SHA를 다시 배포할 때 이전 시도의 잔여 파일이 남지 않도록 지운다.
+          rsync -az --delete -e "ssh -i $HOME/.ssh/id_deploy" \
+            "$src/" "ubuntu@${VM1_HOST}:${remote_dir}/"
+          echo "::endgroup::"
+        done
+
+    - name: Publish releases on VM1
+      run: |
+        set -euo pipefail
+        for app in $(echo '${{ needs.select.outputs.apps }}' | jq -r '.[]'); do
+          remote_dir="/opt/bnbong/releases/${DEPLOY_SHA}/${app}"
+          echo "::group::publish $app"
+          ssh -i ~/.ssh/id_deploy "ubuntu@${VM1_HOST}" \
+            "sudo /opt/bnbong/scripts/vm1-release-static.sh '$app' '$remote_dir'"
+          echo "::endgroup::"
+        done
+
+    - name: Smoke test
+      run: |
+        set -euo pipefail
+        failed=0
+
+        for url in https://bnbong.com/ https://admin.bnbong.com/; do
+          if curl -fsSI --max-time 15 "$url" > /dev/null; then
+            echo "  $url -> OK"
+          else
+            echo "::error::$url 이 정상 응답하지 않았습니다."
+            failed=1
+          fi
+        done
+
+        # index.html은 매 요청마다 재검증해야 새 릴리스가 곧바로 노출된다.
+        for url in https://bnbong.com/ https://admin.bnbong.com/; do
+          headers="$(curl -fsSI --max-time 15 "$url" || true)"
+          if printf '%s' "$headers" | grep -qi '^cache-control:.*no-cache'; then
+            echo "  $url -> Cache-Control: no-cache 확인"
+          else
+            echo "::error::$url 응답에 Cache-Control: no-cache 가 없습니다."
+            printf '%s\n' "$headers"
+            failed=1
+          fi
+        done
+
+        if [ "$failed" -ne 0 ]; then
+          echo "::error::smoke test가 실패했습니다. 이전 SHA로 workflow_dispatch를 실행해 되돌릴 수 있습니다."
+          exit 1
+        fi
+
+    - name: Remove SSH key
+      if: always()
+      run: rm -f ~/.ssh/id_deploy

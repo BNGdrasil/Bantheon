@@ -1,753 +1,580 @@
-import { useQuery, useMutation } from '@tanstack/react-query'
-import { adminApi } from '../services/api'
-import { useState } from 'react'
+import { FormEvent, useMemo, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  HealthCheckAllResult,
+  HealthStatus,
+  ReloadResult,
+  Service,
+  ServiceCreateRequest,
+  ServiceStats,
+  createService,
+  fetchServiceStats,
+  fetchServices,
+  reloadServiceRegistry,
+  runHealthCheckAll,
+  toApiError,
+} from '../services/api'
+import {
+  ErrorPanel,
+  FreshnessLine,
+  LoadingPanel,
+  NoticePanel,
+  describeError,
+} from '../components/StatusPanel'
+import { HealthBadge, ProbeBadge } from '../components/HealthBadge'
+import { POLL_INTERVAL_MS, formatKst, useNow } from '../lib/datetime'
+import { Dialog } from '../components/Dialog'
 
-interface Service {
-  id: number
-  name: string
-  display_name: string | null
-  url: string
-  health_check_path: string
-  timeout_seconds: number
-  rate_limit_per_minute: number
-  is_active: boolean
-  description: string | null
-  created_at: string
-  updated_at: string
-  last_health_check: string | null
-  health_status: 'healthy' | 'unhealthy' | 'unknown' | 'checking'
-  metadata: Record<string, any>
+const EMPTY_SERVICE: ServiceCreateRequest = {
+  name: '',
+  display_name: '',
+  url: '',
+  health_check_path: '/health',
+  timeout_seconds: 30,
+  rate_limit_per_minute: 100,
+  is_active: true,
+  description: '',
 }
 
-interface ServiceStats {
-  total_services: number
-  active_services: number
-  healthy_services: number
-  unhealthy_services: number
-  unknown_services: number
-}
+type StatusFilter = 'all' | HealthStatus
+
+const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
+  { value: 'all', label: '전체' },
+  { value: 'healthy', label: '정상' },
+  { value: 'unhealthy', label: '응답 실패' },
+  { value: 'unknown', label: '미관측' },
+  { value: 'checking', label: '확인 중' },
+]
+
+/**
+ * The gateway rejects a target URL that points at loopback, a metadata service
+ * or a non-HTTP scheme with 422. The message explains the policy so the
+ * operator does not read it as a transient failure.
+ */
+const URL_POLICY_HINT =
+  '등록할 수 있는 주소는 http 또는 https이며, 루프백 주소와 클라우드 메타데이터 주소는 거절됩니다.'
 
 function ServicesPage() {
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
-  const [showAddModal, setShowAddModal] = useState(false)
-  const [newService, setNewService] = useState({
-    name: '',
-    display_name: '',
-    url: '',
-    health_check_path: '/health',
-    timeout_seconds: 30,
-    rate_limit_per_minute: 100,
-    is_active: true,
-    description: '',
-  })
+  const queryClient = useQueryClient()
+  const now = useNow()
 
-  // Fetch services list
-  const { data: services, isLoading: servicesLoading, refetch: refetchServices } = useQuery<Service[]>({
+  const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [showAdd, setShowAdd] = useState(false)
+  const [newService, setNewService] = useState<ServiceCreateRequest>(EMPTY_SERVICE)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [probeResult, setProbeResult] = useState<HealthCheckAllResult | null>(null)
+  const [probeRanAt, setProbeRanAt] = useState<number | null>(null)
+
+  const servicesQuery = useQuery<Service[]>({
     queryKey: ['admin-services'],
-    queryFn: async () => {
-      const response = await adminApi.get('/services')
-      return response.data
-    },
-    refetchInterval: 30000, // Auto-refresh every 30 seconds
+    queryFn: fetchServices,
+    refetchInterval: POLL_INTERVAL_MS,
+    refetchIntervalInBackground: false,
   })
 
-  // Fetch service statistics
-  const { data: stats, isLoading: statsLoading } = useQuery<ServiceStats>({
+  const statsQuery = useQuery<ServiceStats>({
     queryKey: ['admin-services-stats'],
-    queryFn: async () => {
-      const response = await adminApi.get('/services/stats')
-      return response.data
-    },
-    refetchInterval: 30000, // Auto-refresh every 30 seconds
+    queryFn: fetchServiceStats,
+    refetchInterval: POLL_INTERVAL_MS,
+    refetchIntervalInBackground: false,
   })
 
-  // Reload registry mutation
-  const reloadRegistryMutation = useMutation({
-    mutationFn: async () => {
-      const response = await adminApi.post('/services/reload')
-      return response.data
-    },
-    onSuccess: (data) => {
-      setMessage({ type: 'success', text: data.message })
-      setTimeout(() => {
-        refetchServices()
-        setMessage(null)
-      }, 2000)
-    },
-    onError: (error: any) => {
-      setMessage({ 
-        type: 'error', 
-        text: error.response?.data?.detail || 'Failed to reload registry' 
-      })
-      setTimeout(() => setMessage(null), 3000)
-    },
-  })
+  /** Re-reads the server state so a write is confirmed by the store, not assumed. */
+  const refreshServices = async () => {
+    await queryClient.invalidateQueries({ queryKey: ['admin-services'] })
+    await queryClient.invalidateQueries({ queryKey: ['admin-services-stats'] })
+    await queryClient.invalidateQueries({ queryKey: ['overview-stats'] })
+  }
 
-  // Health check all mutation
-  const healthCheckAllMutation = useMutation({
-    mutationFn: async () => {
-      const response = await adminApi.post('/services/health-check-all')
-      return response.data
+  const reloadMutation = useMutation<ReloadResult>({
+    mutationFn: reloadServiceRegistry,
+    onSuccess: async (result) => {
+      setActionError(null)
+      setNotice(`${result.message} · 등록부에 ${result.service_count}건을 적재했습니다.`)
+      await refreshServices()
     },
-    onSuccess: (data) => {
-      setMessage({ type: 'success', text: data.message })
-      setTimeout(() => {
-        refetchServices()
-        setMessage(null)
-      }, 3000)
-    },
-    onError: (error: any) => {
-      setMessage({ 
-        type: 'error', 
-        text: error.response?.data?.detail || 'Failed to trigger health check' 
-      })
-      setTimeout(() => setMessage(null), 3000)
+    onError: (error: unknown) => {
+      setNotice(null)
+      const apiError = toApiError(error)
+      setActionError(
+        apiError.isUpstreamUnavailable
+          ? apiError.detail || '등록부를 다시 적재하지 못했습니다. 게이트웨이 로그를 확인하세요.'
+          : describeError(error, '등록부를 다시 적재하지 못했습니다').message
+      )
     },
   })
 
-  // Add service mutation
-  const addServiceMutation = useMutation({
-    mutationFn: async (serviceData: typeof newService) => {
-      const response = await adminApi.post('/services', serviceData)
-      return response.data
+  const healthCheckMutation = useMutation<HealthCheckAllResult>({
+    mutationFn: runHealthCheckAll,
+    onSuccess: async (result) => {
+      setActionError(null)
+      setNotice(null)
+      setProbeResult(result)
+      setProbeRanAt(Date.now())
+      await refreshServices()
     },
-    onSuccess: () => {
-      setMessage({ type: 'success', text: 'Service added successfully!' })
-      setShowAddModal(false)
-      setNewService({
-        name: '',
-        display_name: '',
-        url: '',
-        health_check_path: '/health',
-        timeout_seconds: 30,
-        rate_limit_per_minute: 100,
-        is_active: true,
-        description: '',
-      })
-      setTimeout(() => {
-        refetchServices()
-        setMessage(null)
-      }, 2000)
-    },
-    onError: (error: any) => {
-      setMessage({ 
-        type: 'error', 
-        text: error.response?.data?.detail || 'Failed to add service' 
-      })
-      setTimeout(() => setMessage(null), 3000)
+    onError: (error: unknown) => {
+      setNotice(null)
+      setProbeResult(null)
+      setActionError(describeError(error, '상태 검사를 실행하지 못했습니다').message)
     },
   })
 
-  const handleAddService = () => {
-    if (!newService.name || !newService.url) {
-      setMessage({ type: 'error', text: 'Name and URL are required' })
-      setTimeout(() => setMessage(null), 3000)
+  const addMutation = useMutation({
+    mutationFn: (payload: ServiceCreateRequest) => createService(payload),
+    onSuccess: async (service) => {
+      setActionError(null)
+      setNotice(`${service.name} 서비스를 등록했습니다. 등록부 반영은 다시 적재 후 확인하세요.`)
+      setShowAdd(false)
+      setNewService(EMPTY_SERVICE)
+      await refreshServices()
+    },
+    onError: () => {
+      setNotice(null)
+    },
+  })
+
+  const services = servicesQuery.data
+  const stats = statsQuery.data
+
+  const visibleServices = useMemo(() => {
+    if (!services) {
+      return []
+    }
+    const keyword = search.trim().toLowerCase()
+    return services.filter((service) => {
+      if (statusFilter !== 'all' && service.health_status !== statusFilter) {
+        return false
+      }
+      if (!keyword) {
+        return true
+      }
+      return (
+        service.name.toLowerCase().includes(keyword) ||
+        (service.display_name || '').toLowerCase().includes(keyword) ||
+        service.url.toLowerCase().includes(keyword)
+      )
+    })
+  }, [services, search, statusFilter])
+
+  const handleAdd = (event: FormEvent) => {
+    event.preventDefault()
+    if (addMutation.isPending) {
       return
     }
-    addServiceMutation.mutate(newService)
-  }
-
-  const getHealthColor = (status: string) => {
-    switch (status) {
-      case 'healthy':
-        return { bg: '#064e3b', text: '#6ee7b7' }
-      case 'unhealthy':
-        return { bg: '#7f1d1d', text: '#fca5a5' }
-      case 'checking':
-        return { bg: '#1e3a8a', text: '#93c5fd' }
-      default:
-        return { bg: '#374151', text: '#9ca3af' }
-    }
-  }
-
-  const formatDate = (dateString: string | null) => {
-    if (!dateString) return 'Never'
-    const date = new Date(dateString)
-    return date.toLocaleString('ko-KR', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
+    addMutation.mutate({
+      ...newService,
+      name: newService.name.trim(),
+      url: newService.url.trim(),
     })
   }
 
-  if (servicesLoading || statsLoading) {
-    return <div style={{ textAlign: 'center', padding: '2rem' }}>Loading services...</div>
+  const addError = addMutation.isError ? toApiError(addMutation.error) : null
+
+  const header = (
+    <div className="page-head">
+      <div>
+        <p className="eyebrow">Service register</p>
+        <h1 className="page-title">서비스</h1>
+        <p className="page-lead">
+          등록 상태와 실제 관측 상태를 나눠서 표시합니다. 등록은 게이트웨이 DB가 원본이며, 등록부
+          적재는 별도 작업입니다.
+        </p>
+      </div>
+      <FreshnessLine
+        dataUpdatedAt={servicesQuery.dataUpdatedAt}
+        now={now}
+        isFetching={servicesQuery.isFetching}
+      />
+    </div>
+  )
+
+  if (servicesQuery.isLoading) {
+    return (
+      <div>
+        {header}
+        <LoadingPanel message="서비스를 불러오는 중입니다." />
+      </div>
+    )
   }
 
   return (
     <div>
-      {/* Header */}
-      <div style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        marginBottom: '2rem',
-      }}>
-        <div>
-          <h1 style={{ fontSize: '2rem', fontWeight: 'bold', marginBottom: '0.5rem' }}>
-            Services
-          </h1>
-          <p style={{ color: '#94a3b8', fontSize: '0.875rem' }}>
-            Manage and monitor API services registered in Bifrost Gateway
-          </p>
-        </div>
-        <div style={{ display: 'flex', gap: '0.75rem' }}>
-          <button
-            onClick={() => setShowAddModal(true)}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: '#059669',
-              color: 'white',
-              borderRadius: '0.5rem',
-              border: 'none',
-              cursor: 'pointer',
-              fontWeight: '600',
-              fontSize: '0.875rem',
-            }}
-          >
-            ➕ Add Service
-          </button>
-          <button
-            onClick={() => refetchServices()}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: '#3b82f6',
-              color: 'white',
-              borderRadius: '0.5rem',
-              border: 'none',
-              cursor: 'pointer',
-              fontWeight: '600',
-              fontSize: '0.875rem',
-            }}
-          >
-            🔄 Refresh
-          </button>
-          <button
-            onClick={() => healthCheckAllMutation.mutate()}
-            disabled={healthCheckAllMutation.isPending}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: healthCheckAllMutation.isPending ? '#6b7280' : '#10b981',
-              color: 'white',
-              borderRadius: '0.5rem',
-              border: 'none',
-              cursor: healthCheckAllMutation.isPending ? 'not-allowed' : 'pointer',
-              fontWeight: '600',
-              fontSize: '0.875rem',
-            }}
-          >
-            {healthCheckAllMutation.isPending ? '⏳ Checking...' : '🏥 Health Check All'}
-          </button>
-          <button
-            onClick={() => reloadRegistryMutation.mutate()}
-            disabled={reloadRegistryMutation.isPending}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: reloadRegistryMutation.isPending ? '#6b7280' : '#8b5cf6',
-              color: 'white',
-              borderRadius: '0.5rem',
-              border: 'none',
-              cursor: reloadRegistryMutation.isPending ? 'not-allowed' : 'pointer',
-              fontWeight: '600',
-              fontSize: '0.875rem',
-            }}
-          >
-            {reloadRegistryMutation.isPending ? '⏳ Reloading...' : '🔁 Reload Registry'}
-          </button>
-        </div>
+      {header}
+
+      {notice && (
+        <NoticePanel tone="success" title="작업을 마쳤습니다">
+          <p>{notice}</p>
+        </NoticePanel>
+      )}
+
+      {actionError && (
+        <NoticePanel tone="error" title="작업이 실패했습니다">
+          <p>{actionError}</p>
+        </NoticePanel>
+      )}
+
+      <div className="toolbar spaced-bottom">
+        <button
+          type="button"
+          className="btn btn--primary"
+          onClick={() => {
+            setActionError(null)
+            addMutation.reset()
+            setShowAdd(true)
+          }}
+        >
+          서비스 등록
+        </button>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => healthCheckMutation.mutate()}
+          disabled={healthCheckMutation.isPending}
+        >
+          {healthCheckMutation.isPending ? '검사 중' : '전체 상태 검사'}
+        </button>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => reloadMutation.mutate()}
+          disabled={reloadMutation.isPending}
+        >
+          {reloadMutation.isPending ? '적재 중' : '등록부 다시 적재'}
+        </button>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => servicesQuery.refetch()}
+          disabled={servicesQuery.isFetching}
+        >
+          {servicesQuery.isFetching ? '불러오는 중' : '다시 불러오기'}
+        </button>
       </div>
 
-      {/* Message Banner */}
-      {message && (
-        <div style={{
-          padding: '1rem',
-          marginBottom: '1.5rem',
-          borderRadius: '0.5rem',
-          backgroundColor: message.type === 'success' ? '#064e3b' : '#7f1d1d',
-          color: message.type === 'success' ? '#6ee7b7' : '#fca5a5',
-          border: `1px solid ${message.type === 'success' ? '#10b981' : '#ef4444'}`,
-        }}>
-          <p style={{ fontSize: '0.875rem', fontWeight: '600' }}>
-            {message.type === 'success' ? '✅ ' : '❌ '}
-            {message.text}
-          </p>
+      {statsQuery.isError ? (
+        <ErrorPanel
+          title="서비스 통계를 불러오지 못했습니다"
+          error={statsQuery.error}
+          fallbackMessage="서비스 통계를 가져오지 못했습니다"
+          onRetry={() => statsQuery.refetch()}
+        />
+      ) : stats ? (
+        <div className="card-grid">
+          <article className="card">
+            <p className="eyebrow">Registered</p>
+            <p className="metric-value">{stats.total_services}</p>
+            <p className="metric-note">등록된 서비스, 활성 {stats.active_services}건</p>
+          </article>
+          <article className="card">
+            <p className="eyebrow">Healthy</p>
+            <p className="metric-value">{stats.healthy_services}</p>
+            <p className="metric-note">마지막 검사에서 정상 응답</p>
+          </article>
+          <article className="card">
+            <p className="eyebrow">Unhealthy</p>
+            <p className="metric-value">{stats.unhealthy_services}</p>
+            <p className="metric-note">마지막 검사에서 응답 실패</p>
+          </article>
+          <article className="card">
+            <p className="eyebrow">Unknown</p>
+            <p className="metric-value">{stats.unknown_services}</p>
+            <p className="metric-note">아직 관측하지 않음. 장애와 구분합니다.</p>
+          </article>
         </div>
+      ) : null}
+
+      {probeResult && (
+        <section className="section">
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">Health check run</p>
+              <h2 className="section-title">상태 검사 결과</h2>
+            </div>
+            <p className="observed-at">
+              실행 {formatKst(probeRanAt)} · 대상 {probeResult.service_count}건
+            </p>
+          </div>
+          {probeResult.service_count === 0 ? (
+            <div className="state-block">
+              <p className="state-block-title">검사한 서비스가 없습니다</p>
+              <p>등록부에 적재된 서비스가 없으면 검사 대상도 없습니다.</p>
+            </div>
+          ) : (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th scope="col">서비스</th>
+                    <th scope="col">검사 결과</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(probeResult.results).map(([name, result]) => (
+                    <tr key={name}>
+                      <td className="mono">{name}</td>
+                      <td>
+                        <ProbeBadge result={result} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       )}
 
-      {/* Statistics Cards */}
-      {stats && (
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-          gap: '1rem',
-          marginBottom: '2rem',
-        }}>
-          <div style={{
-            padding: '1.5rem',
-            backgroundColor: '#1e293b',
-            borderRadius: '0.75rem',
-            border: '1px solid #334155',
-          }}>
-            <p style={{ fontSize: '0.875rem', color: '#94a3b8', marginBottom: '0.5rem' }}>
-              Total Services
-            </p>
-            <p style={{ fontSize: '2rem', fontWeight: 'bold', color: '#f1f5f9' }}>
-              {stats.total_services}
-            </p>
+      <section className="section">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">Registered services</p>
+            <h2 className="section-title">등록 목록</h2>
           </div>
-
-          <div style={{
-            padding: '1.5rem',
-            backgroundColor: '#1e293b',
-            borderRadius: '0.75rem',
-            border: '1px solid #334155',
-          }}>
-            <p style={{ fontSize: '0.875rem', color: '#94a3b8', marginBottom: '0.5rem' }}>
-              Active Services
-            </p>
-            <p style={{ fontSize: '2rem', fontWeight: 'bold', color: '#10b981' }}>
-              {stats.active_services}
-            </p>
-          </div>
-
-          <div style={{
-            padding: '1.5rem',
-            backgroundColor: '#1e293b',
-            borderRadius: '0.75rem',
-            border: '1px solid #334155',
-          }}>
-            <p style={{ fontSize: '0.875rem', color: '#94a3b8', marginBottom: '0.5rem' }}>
-              Healthy
-            </p>
-            <p style={{ fontSize: '2rem', fontWeight: 'bold', color: '#6ee7b7' }}>
-              {stats.healthy_services}
-            </p>
-          </div>
-
-          <div style={{
-            padding: '1.5rem',
-            backgroundColor: '#1e293b',
-            borderRadius: '0.75rem',
-            border: '1px solid #334155',
-          }}>
-            <p style={{ fontSize: '0.875rem', color: '#94a3b8', marginBottom: '0.5rem' }}>
-              Unhealthy
-            </p>
-            <p style={{ fontSize: '2rem', fontWeight: 'bold', color: '#fca5a5' }}>
-              {stats.unhealthy_services}
-            </p>
-          </div>
-
-          <div style={{
-            padding: '1.5rem',
-            backgroundColor: '#1e293b',
-            borderRadius: '0.75rem',
-            border: '1px solid #334155',
-          }}>
-            <p style={{ fontSize: '0.875rem', color: '#94a3b8', marginBottom: '0.5rem' }}>
-              Unknown
-            </p>
-            <p style={{ fontSize: '2rem', fontWeight: 'bold', color: '#9ca3af' }}>
-              {stats.unknown_services}
-            </p>
+          <div className="toolbar">
+            <div className="field">
+              <label className="visually-hidden" htmlFor="service-search">
+                서비스 검색
+              </label>
+              <input
+                id="service-search"
+                type="text"
+                placeholder="이름 또는 주소"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </div>
+            <div className="field">
+              <label className="visually-hidden" htmlFor="service-status">
+                관측 상태 필터
+              </label>
+              <select
+                id="service-status"
+                value={statusFilter}
+                onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}
+              >
+                {STATUS_FILTERS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
-      )}
 
-      {/* Services List */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))',
-        gap: '1.5rem',
-      }}>
-        {services && services.length > 0 ? (
-          services.map((service) => {
-            const healthColors = getHealthColor(service.health_status)
-            return (
-              <div key={service.id} style={{
-                padding: '1.5rem',
-                backgroundColor: '#1e293b',
-                borderRadius: '0.75rem',
-                border: `2px solid ${service.is_active ? '#334155' : '#7f1d1d'}`,
-              }}>
-                {/* Service Header */}
-                <div style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'start',
-                  marginBottom: '1rem',
-                }}>
-                  <div>
-                    <h3 style={{ fontSize: '1.25rem', fontWeight: '600', marginBottom: '0.25rem' }}>
-                      {service.display_name || service.name}
-                    </h3>
-                    <p style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: '#94a3b8' }}>
-                      {service.name}
-                    </p>
-                  </div>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <span style={{
-                      padding: '0.25rem 0.75rem',
-                      borderRadius: '9999px',
-                      fontSize: '0.75rem',
-                      fontWeight: '600',
-                      backgroundColor: healthColors.bg,
-                      color: healthColors.text,
-                    }}>
-                      {service.health_status}
-                    </span>
-                    {!service.is_active && (
-                      <span style={{
-                        padding: '0.25rem 0.75rem',
-                        borderRadius: '9999px',
-                        fontSize: '0.75rem',
-                        fontWeight: '600',
-                        backgroundColor: '#7f1d1d',
-                        color: '#fca5a5',
-                      }}>
-                        Inactive
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Service Description */}
-                {service.description && (
-                  <p style={{
-                    fontSize: '0.875rem',
-                    color: '#cbd5e1',
-                    marginBottom: '1rem',
-                  }}>
-                    {service.description}
-                  </p>
-                )}
-
-                {/* Service Details */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                  <div>
-                    <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '0.25rem' }}>
-                      Base URL
-                    </p>
-                    <p style={{
-                      fontSize: '0.875rem',
-                      fontFamily: 'monospace',
-                      color: '#f1f5f9',
-                      wordBreak: 'break-all',
-                    }}>
-                      {service.url}
-                    </p>
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
-                    <div>
-                      <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '0.25rem' }}>
-                        Health Check
-                      </p>
-                      <p style={{ fontSize: '0.875rem', fontFamily: 'monospace', color: '#f1f5f9' }}>
-                        {service.health_check_path}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '0.25rem' }}>
-                        Timeout
-                      </p>
-                      <p style={{ fontSize: '0.875rem', color: '#f1f5f9' }}>
-                        {service.timeout_seconds}s
-                      </p>
-                    </div>
-                  </div>
-
-                  <div>
-                    <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '0.25rem' }}>
-                      Last Health Check
-                    </p>
-                    <p style={{ fontSize: '0.875rem', color: '#f1f5f9' }}>
-                      {formatDate(service.last_health_check)}
-                    </p>
-                  </div>
-
-                  <div>
-                    <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '0.25rem' }}>
-                      Rate Limit
-                    </p>
-                    <p style={{ fontSize: '0.875rem', color: '#f1f5f9' }}>
-                      {service.rate_limit_per_minute} req/min
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )
-          })
+        {servicesQuery.isError ? (
+          <ErrorPanel
+            title="서비스 목록을 불러오지 못했습니다"
+            error={servicesQuery.error}
+            fallbackMessage="서비스 목록을 가져오지 못했습니다"
+            onRetry={() => servicesQuery.refetch()}
+          />
+        ) : !services || services.length === 0 ? (
+          <div className="state-block">
+            <p className="state-block-title">등록된 서비스가 없습니다</p>
+            <p>서비스 등록 버튼으로 첫 서비스를 추가하세요.</p>
+          </div>
+        ) : visibleServices.length === 0 ? (
+          <div className="state-block">
+            <p className="state-block-title">조건에 맞는 서비스가 없습니다</p>
+            <p>검색어나 상태 필터를 바꿔 보세요.</p>
+          </div>
         ) : (
-          <div style={{
-            padding: '3rem',
-            textAlign: 'center',
-            color: '#94a3b8',
-            gridColumn: '1 / -1',
-          }}>
-            <p style={{ fontSize: '1.125rem', marginBottom: '0.5rem' }}>No services registered</p>
-            <p style={{ fontSize: '0.875rem' }}>
-              Add services via the Bifrost API or Admin API
-            </p>
+          <div className="table-wrap">
+            <table className="data-table data-table--wide">
+              <thead>
+                <tr>
+                  <th scope="col">서비스</th>
+                  <th scope="col">등록 상태</th>
+                  <th scope="col">관측 상태</th>
+                  <th scope="col">마지막 관측</th>
+                  <th scope="col">대상 주소</th>
+                  <th scope="col">제한</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleServices.map((service) => (
+                  <tr key={service.id}>
+                    <td>
+                      <span className="row-name">{service.display_name || service.name}</span>
+                      <div className="detail mono">{service.name}</div>
+                      {service.description && <div className="detail">{service.description}</div>}
+                    </td>
+                    <td>
+                      <span className={`badge ${service.is_active ? 'badge--info' : 'badge--neutral'}`}>
+                        {service.is_active ? '활성' : '비활성'}
+                      </span>
+                    </td>
+                    <td>
+                      <HealthBadge status={service.health_status} />
+                    </td>
+                    <td className="mono detail">{formatKst(service.last_health_check, '관측 없음')}</td>
+                    <td>
+                      <div className="mono detail break-all">
+                        {service.url}
+                      </div>
+                      <div className="detail mono">검사 경로 {service.health_check_path}</div>
+                    </td>
+                    <td className="detail">
+                      <div className="mono">{service.timeout_seconds}s</div>
+                      <div className="mono">{service.rate_limit_per_minute} req/min</div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
-      </div>
+      </section>
 
-      {/* Add Service Modal */}
-      {showAddModal && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(0, 0, 0, 0.8)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 1000,
-        }}>
-          <div style={{
-            backgroundColor: '#1e293b',
-            borderRadius: '0.75rem',
-            border: '1px solid #334155',
-            padding: '2rem',
-            maxWidth: '600px',
-            width: '90%',
-            maxHeight: '90vh',
-            overflowY: 'auto',
-          }}>
-            <div style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginBottom: '1.5rem',
-            }}>
-              <h2 style={{ fontSize: '1.5rem', fontWeight: 'bold' }}>Add New Service</h2>
-              <button
-                onClick={() => setShowAddModal(false)}
-                style={{
-                  backgroundColor: 'transparent',
-                  border: 'none',
-                  color: '#94a3b8',
-                  fontSize: '1.5rem',
-                  cursor: 'pointer',
-                }}
-              >
-                ✕
-              </button>
+      {showAdd && (
+        <Dialog
+          labelledBy="add-service-title"
+          onClose={() => setShowAdd(false)}
+          closeDisabled={addMutation.isPending}
+          onSubmit={handleAdd}
+        >
+          <>
+            <div className="modal-head">
+              <h2 className="modal-title" id="add-service-title">
+                서비스 등록
+              </h2>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              <div>
-                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', color: '#cbd5e1' }}>
-                  Service Name * <span style={{ color: '#64748b', fontSize: '0.75rem' }}>(used in routing)</span>
-                </label>
-                <input
-                  type="text"
-                  value={newService.name}
-                  onChange={(e) => setNewService({ ...newService, name: e.target.value })}
-                  placeholder="e.g., my-service"
-                  style={{
-                    width: '100%',
-                    padding: '0.75rem',
-                    backgroundColor: '#0f172a',
-                    border: '1px solid #334155',
-                    borderRadius: '0.5rem',
-                    color: 'white',
-                    fontSize: '0.875rem',
-                  }}
-                />
-              </div>
+            {addError && (
+              <NoticePanel
+                tone={addError.status === 422 ? 'warning' : 'error'}
+                title={addError.status === 422 ? '주소 정책에 맞지 않습니다' : '등록하지 못했습니다'}
+              >
+                <p>{describeError(addMutation.error, '서비스를 등록하지 못했습니다').message}</p>
+                {addError.status === 422 && <p className="spaced-top-sm">{URL_POLICY_HINT}</p>}
+              </NoticePanel>
+            )}
 
-              <div>
-                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', color: '#cbd5e1' }}>
-                  Display Name
-                </label>
+            <div className="form-grid">
+              <div className="field">
+                <label htmlFor="svc-name">서비스 이름</label>
                 <input
+                  id="svc-name"
+                  className="mono"
+                  type="text"
+                  required
+                  value={newService.name}
+                  onChange={(event) => setNewService({ ...newService, name: event.target.value })}
+                />
+                <span className="field-hint">라우팅 경로에 사용됩니다.</span>
+              </div>
+              <div className="field">
+                <label htmlFor="svc-display">표시 이름</label>
+                <input
+                  id="svc-display"
                   type="text"
                   value={newService.display_name}
-                  onChange={(e) => setNewService({ ...newService, display_name: e.target.value })}
-                  placeholder="e.g., My Service"
-                  style={{
-                    width: '100%',
-                    padding: '0.75rem',
-                    backgroundColor: '#0f172a',
-                    border: '1px solid #334155',
-                    borderRadius: '0.5rem',
-                    color: 'white',
-                    fontSize: '0.875rem',
-                  }}
+                  onChange={(event) =>
+                    setNewService({ ...newService, display_name: event.target.value })
+                  }
                 />
               </div>
-
-              <div>
-                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', color: '#cbd5e1' }}>
-                  Service URL *
-                </label>
+              <div className="field field--full">
+                <label htmlFor="svc-url">대상 주소</label>
                 <input
+                  id="svc-url"
+                  className="mono"
                   type="text"
+                  required
+                  placeholder="https://example.internal:8080"
                   value={newService.url}
-                  onChange={(e) => setNewService({ ...newService, url: e.target.value })}
-                  placeholder="e.g., http://my-service:8080"
-                  style={{
-                    width: '100%',
-                    padding: '0.75rem',
-                    backgroundColor: '#0f172a',
-                    border: '1px solid #334155',
-                    borderRadius: '0.5rem',
-                    color: 'white',
-                    fontSize: '0.875rem',
-                    fontFamily: 'monospace',
-                  }}
+                  onChange={(event) => setNewService({ ...newService, url: event.target.value })}
                 />
+                <span className="field-hint">{URL_POLICY_HINT}</span>
               </div>
-
-              <div>
-                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', color: '#cbd5e1' }}>
-                  Health Check Path
-                </label>
+              <div className="field">
+                <label htmlFor="svc-health">상태 검사 경로</label>
                 <input
+                  id="svc-health"
+                  className="mono"
                   type="text"
                   value={newService.health_check_path}
-                  onChange={(e) => setNewService({ ...newService, health_check_path: e.target.value })}
-                  style={{
-                    width: '100%',
-                    padding: '0.75rem',
-                    backgroundColor: '#0f172a',
-                    border: '1px solid #334155',
-                    borderRadius: '0.5rem',
-                    color: 'white',
-                    fontSize: '0.875rem',
-                    fontFamily: 'monospace',
-                  }}
+                  onChange={(event) =>
+                    setNewService({ ...newService, health_check_path: event.target.value })
+                  }
                 />
               </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                <div>
-                  <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', color: '#cbd5e1' }}>
-                    Timeout (seconds)
-                  </label>
-                  <input
-                    type="number"
-                    value={newService.timeout_seconds}
-                    onChange={(e) => setNewService({ ...newService, timeout_seconds: parseInt(e.target.value) })}
-                    min="1"
-                    max="300"
-                    style={{
-                      width: '100%',
-                      padding: '0.75rem',
-                      backgroundColor: '#0f172a',
-                      border: '1px solid #334155',
-                      borderRadius: '0.5rem',
-                      color: 'white',
-                      fontSize: '0.875rem',
-                    }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', color: '#cbd5e1' }}>
-                    Rate Limit (req/min)
-                  </label>
-                  <input
-                    type="number"
-                    value={newService.rate_limit_per_minute}
-                    onChange={(e) => setNewService({ ...newService, rate_limit_per_minute: parseInt(e.target.value) })}
-                    min="1"
-                    style={{
-                      width: '100%',
-                      padding: '0.75rem',
-                      backgroundColor: '#0f172a',
-                      border: '1px solid #334155',
-                      borderRadius: '0.5rem',
-                      color: 'white',
-                      fontSize: '0.875rem',
-                    }}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', color: '#cbd5e1' }}>
-                  Description
-                </label>
-                <textarea
-                  value={newService.description}
-                  onChange={(e) => setNewService({ ...newService, description: e.target.value })}
-                  placeholder="Brief description of the service"
-                  rows={3}
-                  style={{
-                    width: '100%',
-                    padding: '0.75rem',
-                    backgroundColor: '#0f172a',
-                    border: '1px solid #334155',
-                    borderRadius: '0.5rem',
-                    color: 'white',
-                    fontSize: '0.875rem',
-                    resize: 'vertical',
-                  }}
-                />
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <div className="field">
+                <label htmlFor="svc-timeout">응답 제한 시간 (초)</label>
                 <input
-                  type="checkbox"
-                  id="is_active"
-                  checked={newService.is_active}
-                  onChange={(e) => setNewService({ ...newService, is_active: e.target.checked })}
-                  style={{ width: '1.25rem', height: '1.25rem', cursor: 'pointer' }}
+                  id="svc-timeout"
+                  type="number"
+                  min={1}
+                  max={300}
+                  value={newService.timeout_seconds}
+                  onChange={(event) =>
+                    setNewService({ ...newService, timeout_seconds: Number(event.target.value) || 0 })
+                  }
                 />
-                <label htmlFor="is_active" style={{ fontSize: '0.875rem', color: '#cbd5e1', cursor: 'pointer' }}>
-                  Service is active (will receive traffic)
-                </label>
               </div>
-
-              <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
-                <button
-                  onClick={handleAddService}
-                  disabled={addServiceMutation.isPending}
-                  style={{
-                    flex: 1,
-                    padding: '0.75rem',
-                    backgroundColor: addServiceMutation.isPending ? '#6b7280' : '#059669',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '0.5rem',
-                    fontWeight: '600',
-                    cursor: addServiceMutation.isPending ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  {addServiceMutation.isPending ? 'Adding...' : 'Add Service'}
-                </button>
-                <button
-                  onClick={() => setShowAddModal(false)}
-                  disabled={addServiceMutation.isPending}
-                  style={{
-                    flex: 1,
-                    padding: '0.75rem',
-                    backgroundColor: '#475569',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '0.5rem',
-                    fontWeight: '600',
-                    cursor: addServiceMutation.isPending ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  Cancel
-                </button>
+              <div className="field">
+                <label htmlFor="svc-rate">요청 제한 (req/min)</label>
+                <input
+                  id="svc-rate"
+                  type="number"
+                  min={1}
+                  value={newService.rate_limit_per_minute}
+                  onChange={(event) =>
+                    setNewService({
+                      ...newService,
+                      rate_limit_per_minute: Number(event.target.value) || 0,
+                    })
+                  }
+                />
+              </div>
+              <div className="field field--full">
+                <label htmlFor="svc-description">설명</label>
+                <textarea
+                  id="svc-description"
+                  rows={3}
+                  value={newService.description}
+                  onChange={(event) =>
+                    setNewService({ ...newService, description: event.target.value })
+                  }
+                />
+              </div>
+              <div className="field field--full">
+                <div className="checkbox-row">
+                  <input
+                    id="svc-active"
+                    type="checkbox"
+                    checked={newService.is_active}
+                    onChange={(event) =>
+                      setNewService({ ...newService, is_active: event.target.checked })
+                    }
+                  />
+                  <label htmlFor="svc-active">등록 즉시 트래픽을 받도록 활성화합니다</label>
+                </div>
               </div>
             </div>
-          </div>
-        </div>
+
+            <div className="form-actions">
+              <button type="submit" className="btn btn--primary" disabled={addMutation.isPending}>
+                {addMutation.isPending ? '등록 중' : '등록'}
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setShowAdd(false)}
+                disabled={addMutation.isPending}
+              >
+                취소
+              </button>
+            </div>
+          </>
+        </Dialog>
       )}
     </div>
   )
 }
 
 export default ServicesPage
-
