@@ -225,7 +225,9 @@ jobs:
         done
 
         if [ "$failed" -ne 0 ]; then
-          echo "::error::smoke test가 실패했습니다. 이전 SHA로 workflow_dispatch를 실행해 되돌릴 수 있습니다."
+          echo "::error::smoke test가 실패했습니다."
+          echo "::error::즉시 복원: ssh VM1 후 sudo /opt/bnbong/scripts/vm1-release-static.sh rollback <app>"
+          echo "::error::재빌드 복원: 이전 SHA로 이 워크플로를 workflow_dispatch로 실행합니다."
           exit 1
         fi
 

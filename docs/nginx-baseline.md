@@ -174,7 +174,9 @@ nginx: configuration file /etc/nginx/nginx.conf test is successful
 
 아직 운영에 적용하지 않았습니다. 적용할 때는 다음 순서를 권장합니다.
 
-1. VM1에서 현재 설정을 먼저 보존합니다. `cp /opt/bnbong/nginx/nginx.conf /opt/bnbong/nginx/nginx.conf.bak-<날짜>`처럼 되돌릴 수 있는 사본을 남깁니다.
+1. VM1에서 현재 설정 일습을 release 하나로 보존합니다. `scripts/vm1-apply-nginx.sh`가 이 작업을 수행하며, `/opt/bnbong/nginx-releases/<UTC 타임스탬프>/` 아래에 `nginx.conf`와 `snippets/` 디렉터리 전체, `docker-compose.yml`, 그리고 실행 중이던 nginx 컨테이너의 이미지 digest를 함께 남깁니다. 같은 디렉터리의 `manifest` 파일에는 보존한 파일마다 계산한 sha256 값과 이미지 digest를 기록하므로, 나중에 보존본이 손상되지 않았는지 확인할 수 있습니다. 최근 다섯 개를 남기고 그보다 오래된 release는 삭제합니다.
+
+   파일을 하나씩 백업하는 방식은 두 번째 배포부터 통하지 않습니다. 첫 전환 이후에는 이전 `nginx.conf`도 snippet을 include하기 때문에, 설정 파일 하나만 되돌리면 그 파일이 새 snippet을 읽게 됩니다. 세 구성 요소를 같은 release에 묶어 두어야 이 문제를 피할 수 있습니다.
 2. 새 설정 일습을 운영 경로가 아니라 staging 디렉터리 `/opt/bnbong/nginx.next/`에 먼저 올립니다. `nginx.conf`와 `snippets/` 디렉터리 전체를 함께 올려야 include 대상이 빠지지 않습니다.
 3. staging 내용을 임시 컨테이너로 선검증합니다. 실제 배포와 같은 mount 구성을 그대로 재현해야 하므로 인증서 디렉터리까지 연결합니다.
 
@@ -193,9 +195,18 @@ nginx: configuration file /etc/nginx/nginx.conf test is successful
 7. 검사를 통과하면 `docker compose exec nginx nginx -s reload`로 적용합니다.
 8. 여섯 개 도메인(`bnbong.com`, `api`, `admin`, `monitoring`, `ambiw`, `overlock`)에 대해 HTTP와 HTTPS 응답, SPA 경로 직접 접근, 존재하지 않는 정적 파일의 404, Grafana WebSocket 연결, `Cache-Control` 헤더를 확인합니다. `dashboard.bnbong.com`도 계속 응답하는지 함께 확인합니다.
 9. 헤더 회귀를 별도로 확인합니다. `curl -I https://admin.bnbong.com/<존재하지_않는_SPA_경로>`가 `Cache-Control: no-cache`와 보안 헤더를 함께 돌려주는지, `curl -I https://admin.bnbong.com/assets/<해시파일>`이 `immutable`과 보안 헤더를 함께 돌려주는지 봅니다. `https://overlock.bnbong.com/index.wasm`의 보안 헤더도 확인합니다. admin의 SPA fallback 경로가 이번에 바뀌었으므로 이 확인을 건너뛰지 않습니다.
-10. 문제가 생기면 1번에서 남긴 사본을 되돌리고 snippets mount를 제거한 뒤 컨테이너를 재생성합니다. 이전 설정에는 include가 없으므로 snippets 디렉터리가 남아 있어도 무방합니다.
+10. 문제가 생기면 같은 release에서 세 구성 요소를 함께 되돌립니다.
 
-`bngdrasil/deploy_vm1.sh`가 위 순서를 구현하며, 같은 순서를 VM1에서 직접 실행하는 `scripts/vm1-apply-nginx.sh`와 그 스크립트를 호출하는 `.github/workflows/deploy-nginx.yml` 워크플로도 준비되어 있습니다.
+    ```bash
+    sudo /opt/bnbong/scripts/vm1-apply-nginx.sh list
+    sudo /opt/bnbong/scripts/vm1-apply-nginx.sh rollback [<release>]
+    ```
+
+    `rollback`은 `nginx.conf`와 `docker-compose.yml`을 보존 시점의 내용으로 되돌리고, `snippets/`는 `rsync --delete`로 보존 시점과 정확히 같은 구성으로 맞춘 다음, 컨테이너를 재생성하고 컨테이너 안에서 `nginx -t`를 실행해 결과를 확인합니다. release 이름을 생략하면 가장 최근에 보존한 release를 사용합니다. 되돌리기 전에는 manifest에 기록된 sha256 값과 실제 파일을 대조하므로, 보존본이 손상되었다면 운영 경로를 건드리지 않고 멈춥니다.
+
+11. 자동 복원 범위를 구분해 두었습니다. 3번의 선검증에서 실패하면 운영 경로를 아직 교체하지 않은 상태이므로 스크립트가 그대로 종료하고, staging 디렉터리를 남겨 원인을 확인하게 합니다. 4번 이후, 즉 운영 경로를 교체한 다음에 컨테이너 재생성이나 `nginx -t`, `reload`가 실패하면 스크립트가 이번 실행 직전에 보존한 release로 자동 복원하고 `nginx -t`까지 확인한 다음, 종료 상태 1로 끝냅니다. 8번과 9번의 확인에서 문제를 발견한 경우처럼 스크립트가 끝난 뒤에 되돌려야 한다면 10번의 `rollback`을 직접 실행합니다.
+
+위 순서의 서버 측 구현은 `scripts/vm1-apply-nginx.sh` 하나에 모여 있습니다. `.github/workflows/deploy-nginx.yml` 워크플로와 `bngdrasil/deploy_vm1.sh`는 모두 파일을 staging 경로에 올린 다음 이 스크립트를 호출합니다. 두 진입점이 같은 구현을 사용하기 때문에 실패했을 때의 복원 동작도 서로 같습니다.
 
 ## 7. 남은 위험
 

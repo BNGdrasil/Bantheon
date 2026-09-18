@@ -121,10 +121,14 @@ VM1 배포는 서로 성격이 다른 두 워크플로로 나누어져 있다.
 
 | 스크립트 | 역할 |
 |---|---|
-| `vm1-release-static.sh <client\|admin> <release_dir>` | 전송된 릴리스를 `rsync -a --delete`로 `/opt/bnbong/<app>/dist/`에 반영하고, `current-<app>` 심볼릭 링크를 갱신하며, `releases/` 아래의 릴리스를 최근 다섯 개만 남긴다. `index.html`이 없으면 반영하지 않고 실패한다 |
-| `vm1-apply-nginx.sh` | 현재 설정을 백업하고, staging 디렉터리의 설정을 임시 컨테이너로 먼저 검사한 다음, 검사를 통과한 경우에만 운영 경로로 옮기고 컨테이너를 재생성한 뒤 reload한다. 실패하면 백업 경로와 되돌리는 명령을 출력한다 |
+| `vm1-release-static.sh <client\|admin> <release_dir>` | 전송된 릴리스를 `rsync -a --delete`로 `/opt/bnbong/<app>/dist/`에 반영하고, `current-<app>`과 `previous-<app>` 심볼릭 링크를 갱신하며, `releases/<sha>/<app>` 단위로 최근 다섯 개만 남긴다. `index.html`이 없으면 반영하지 않고 실패한다 |
+| `vm1-release-static.sh rollback <client\|admin>` | 해당 앱의 직전 release를 다시 `dist/`에 동기화하고 두 링크를 맞바꾼다 |
+| `vm1-apply-nginx.sh` | 현재 설정 일습을 release로 보존하고, staging 디렉터리의 설정을 임시 컨테이너로 먼저 검사한 다음, 검사를 통과한 경우에만 운영 경로로 옮기고 컨테이너를 재생성한 뒤 reload한다. 운영 경로를 교체한 뒤에 실패하면 보존한 release로 자동 복원한다 |
+| `vm1-apply-nginx.sh rollback [<release>]` | `nginx.conf`, `snippets/`, `docker-compose.yml`을 같은 release에서 함께 되돌리고, 컨테이너를 재생성한 다음 `nginx -t`까지 확인한다. `list` 서브커맨드로 보존 목록을 확인한다 |
 
 두 스크립트는 `BNBONG_ROOT` 환경 변수로 배포 루트를 바꿀 수 있으므로, 운영 VM이 아닌 환경에서도 동작을 확인할 수 있다.
+
+`vm1-release-static.sh`의 보존 정책은 앱별로 적용된다. `releases/`는 두 앱이 함께 쓰는 경로이므로, 정리 대상을 `releases/<sha>/<app>` 단위로 잡고 `current-*`이나 `previous-*` 링크가 가리키는 release는 개수와 무관하게 남긴다. 그래야 한 앱만 여러 번 배포해도 다른 앱이 현재 서비스하는 release와 그 앱의 롤백 지점이 사라지지 않는다. 앱 디렉터리를 지운 결과로 비어 버린 `releases/<sha>` 디렉터리만 함께 정리한다. 정적 파일 동기화가 중간에 실패하면 직전 release로 다시 동기화해서 `dist/`의 내용을 한 판본으로 맞춘 다음 실패로 끝낸다.
 
 ### 5.4 필요한 저장소 secret
 
@@ -146,9 +150,11 @@ VM1 배포는 서로 성격이 다른 두 워크플로로 나누어져 있다.
 2. 릴리스를 받을 디렉터리를 만들고 `ubuntu` 소유로 둔다. 워크플로는 이 경로를 만들 때 `sudo`를 사용하지 않는다.
 
    ```bash
-   sudo mkdir -p /opt/bnbong/releases /opt/bnbong/scripts
+   sudo mkdir -p /opt/bnbong/releases /opt/bnbong/scripts /opt/bnbong/nginx-releases
    sudo chown -R ubuntu:ubuntu /opt/bnbong/releases
    ```
+
+   `nginx-releases`는 `vm1-apply-nginx.sh`가 `root` 권한으로 쓰는 경로이므로 소유자를 `ubuntu`로 바꾸지 않는다.
 
 3. 이 저장소의 `scripts/` 두 파일을 VM1의 `/opt/bnbong/scripts/`에 설치한다. 두 스크립트는 `root` 소유여야 하고, `ubuntu`가 내용을 고칠 수 없어야 한다. 그렇지 않으면 아래 sudoers 설정이 권한 상승 통로가 된다.
 
@@ -175,7 +181,18 @@ VM1 배포는 서로 성격이 다른 두 워크플로로 나누어져 있다.
 
 정적 배포를 되돌릴 때는 `deploy.yml`을 수동 실행하면서 `sha` 입력에 이전 커밋 SHA를 넣는다. 워크플로는 그 커밋을 다시 checkout 해서 빌드한 다음 같은 절차로 배포한다. 과거 아티팩트를 되살리지 않고 다시 빌드하는 이유는, 아티팩트 보관 기간이 30일로 제한되어 있어 재현성이 더 높기 때문이다. 특정 앱만 되돌리려면 `apps` 입력에 `client` 또는 `admin` 하나만 넣는다.
 
-Nginx 설정을 되돌릴 때는 `vm1-apply-nginx.sh`가 남긴 백업 사본을 사용한다. 스크립트는 실행할 때마다 `/opt/bnbong/nginx/nginx.conf.bak-<시각>`과 `/opt/bnbong/docker-compose.yml.bak-<시각>`을 남기고, 실패하거나 완료할 때 되돌리는 명령을 함께 출력한다.
+직전 release로 즉시 되돌려야 한다면 다시 빌드할 필요가 없다. VM1에서 `sudo /opt/bnbong/scripts/vm1-release-static.sh rollback <client|admin>`을 실행하면 그 앱의 직전 release를 `dist/`에 다시 동기화하고, `current-<app>`과 `previous-<app>` 링크를 맞바꾼다. 같은 명령을 한 번 더 실행하면 원래 release로 돌아온다.
+
+Nginx 설정을 되돌릴 때는 `vm1-apply-nginx.sh`가 보존한 release를 사용한다. 스크립트는 실행할 때마다 적용 직전의 `nginx.conf`와 `snippets/` 전체, `docker-compose.yml`, 그리고 실행 중이던 컨테이너의 이미지 digest를 `/opt/bnbong/nginx-releases/<UTC 타임스탬프>/`에 함께 남기고, 최근 다섯 개를 보존한다. 파일마다 계산한 sha256 값은 같은 디렉터리의 `manifest`에 기록한다.
+
+```bash
+sudo /opt/bnbong/scripts/vm1-apply-nginx.sh list
+sudo /opt/bnbong/scripts/vm1-apply-nginx.sh rollback [<release>]
+```
+
+`rollback`은 세 구성 요소를 같은 release에서 함께 되돌린다. `snippets/`는 `rsync --delete`로 보존 시점과 정확히 같은 구성으로 맞추기 때문에, 그 뒤에 추가된 snippet이 남아서 되돌린 `nginx.conf`와 섞이는 일이 생기지 않는다. 되돌린 다음에는 컨테이너를 재생성하고 `nginx -t`로 결과를 확인한다. release 이름을 생략하면 가장 최근에 보존한 release를 사용한다.
+
+운영 경로를 교체한 뒤에 컨테이너 재생성이나 `nginx -t`가 실패하면 스크립트가 같은 절차로 자동 복원한다. 선검증 단계에서 실패한 경우에는 운영 경로를 아직 교체하지 않았으므로 staging 디렉터리만 남기고 종료한다. 워크플로가 끝난 뒤에 smoke test나 헤더 확인에서 문제를 발견했다면 위 `rollback` 명령을 직접 실행한다.
 
 ### 5.7 배포 중 주의할 점
 
