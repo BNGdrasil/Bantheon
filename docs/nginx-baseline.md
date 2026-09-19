@@ -194,7 +194,23 @@ nginx: configuration file /etc/nginx/nginx.conf test is successful
 6. 컨테이너 안에서 `docker compose exec nginx nginx -t`로 문법을 다시 검사합니다. 3번은 파일 내용을, 이 단계는 실제 mount가 연결된 상태를 확인합니다.
 7. 검사를 통과하면 `docker compose exec nginx nginx -s reload`로 적용합니다.
 8. 여섯 개 도메인(`bnbong.com`, `api`, `admin`, `monitoring`, `ambiw`, `overlock`)에 대해 HTTP와 HTTPS 응답, SPA 경로 직접 접근, 존재하지 않는 정적 파일의 404, Grafana WebSocket 연결, `Cache-Control` 헤더를 확인합니다. `dashboard.bnbong.com`도 계속 응답하는지 함께 확인합니다.
-9. 헤더 회귀를 별도로 확인합니다. `curl -I https://admin.bnbong.com/<존재하지_않는_SPA_경로>`가 `Cache-Control: no-cache`와 보안 헤더를 함께 돌려주는지, `curl -I https://admin.bnbong.com/assets/<해시파일>`이 `immutable`과 보안 헤더를 함께 돌려주는지 봅니다. `https://overlock.bnbong.com/index.wasm`의 보안 헤더도 확인합니다. admin의 SPA fallback 경로가 이번에 바뀌었으므로 이 확인을 건너뛰지 않습니다.
+
+   이 확인은 VM1 안에서 수행해야 하며, 공개 URL을 밖에서 호출한 결과로 판정하면 안 됩니다. `--resolve`로 이름 해석을 루프백에 고정하면 Cloudflare를 거치지 않고 Nginx에 직접 요청할 수 있습니다. 인증서가 Cloudflare origin certificate라서 공개 CA 체인으로는 검증되지 않으므로 `-k`를 함께 씁니다.
+
+   ```bash
+   curl -sk -o /dev/null -w '%{http_code}\n' \
+     --resolve admin.bnbong.com:443:127.0.0.1 https://admin.bnbong.com/
+   ```
+
+   `monitoring.bnbong.com`은 Grafana가 익명 접근을 허용하지 않으면 로그인 화면으로 넘기므로 200과 302를 모두 정상으로 봅니다. `api.bnbong.com`은 루트 대신 `/health`를 확인합니다.
+9. 헤더 회귀를 별도로 확인합니다. admin의 SPA 딥링크(예: `/users`)가 200과 함께 `Cache-Control: no-cache`, `X-Frame-Options`, `X-Content-Type-Options`를 돌려주는지, `admin.bnbong.com/assets/<해시파일>`이 `immutable`과 보안 헤더를 함께 돌려주는지 봅니다. `overlock.bnbong.com/index.wasm`의 보안 헤더도 확인합니다. admin의 SPA fallback 경로가 이번에 바뀌었으므로 이 확인을 건너뛰지 않습니다.
+
+   ```bash
+   curl -sk -o /dev/null -D - \
+     --resolve admin.bnbong.com:443:127.0.0.1 https://admin.bnbong.com/users
+   ```
+
+   헤더 확인이야말로 오리진에서 수행해야 하는 대표적인 검사입니다. GitHub 러너는 데이터센터 대역의 주소를 쓰기 때문에 Cloudflare가 봇으로 판단해 `HTTP 403`과 `cf-mitigated: challenge` 헤더를 가진 챌린지 페이지를 돌려줄 수 있는데, 그 응답은 오리진까지 도달하지 않았으므로 Nginx가 붙인 헤더를 전혀 담고 있지 않습니다. 2026-09-19의 `deploy-nginx.yml` 실행에서 실제로 이 일이 벌어졌습니다. 오리진은 정상이었는데도 러너가 받은 챌린지 페이지에 `Cache-Control: no-cache`가 없어서 워크플로가 헤더 회귀로 오판하고 롤백을 안내했습니다. 그 뒤로 워크플로는 SSH로 VM1에 접속해서 위와 같은 방식으로 판정하고, 러너에서의 공개 URL 확인은 참고용 경고로만 남깁니다.
 10. 문제가 생기면 같은 release에서 세 구성 요소를 함께 되돌립니다.
 
     ```bash
@@ -204,7 +220,7 @@ nginx: configuration file /etc/nginx/nginx.conf test is successful
 
     `rollback`은 `nginx.conf`와 `docker-compose.yml`을 보존 시점의 내용으로 되돌리고, `snippets/`는 `rsync --delete`로 보존 시점과 정확히 같은 구성으로 맞춘 다음, 컨테이너를 재생성하고 컨테이너 안에서 `nginx -t`를 실행해 결과를 확인합니다. release 이름을 생략하면 가장 최근에 보존한 release를 사용합니다. 되돌리기 전에는 manifest에 기록된 sha256 값과 실제 파일을 대조하므로, 보존본이 손상되었다면 운영 경로를 건드리지 않고 멈춥니다.
 
-11. 자동 복원 범위를 구분해 두었습니다. 3번의 선검증에서 실패하면 운영 경로를 아직 교체하지 않은 상태이므로 스크립트가 그대로 종료하고, staging 디렉터리를 남겨 원인을 확인하게 합니다. 4번 이후, 즉 운영 경로를 교체한 다음에 컨테이너 재생성이나 `nginx -t`, `reload`가 실패하면 스크립트가 이번 실행 직전에 보존한 release로 자동 복원하고 `nginx -t`까지 확인한 다음, 종료 상태 1로 끝냅니다. 8번과 9번의 확인에서 문제를 발견한 경우처럼 스크립트가 끝난 뒤에 되돌려야 한다면 10번의 `rollback`을 직접 실행합니다.
+11. 자동 복원 범위를 구분해 두었습니다. 3번의 선검증에서 실패하면 운영 경로를 아직 교체하지 않은 상태이므로 스크립트가 그대로 종료하고, staging 디렉터리를 남겨 원인을 확인하게 합니다. 4번 이후, 즉 운영 경로를 교체한 다음에 컨테이너 재생성이나 `nginx -t`, `reload`가 실패하면 스크립트가 이번 실행 직전에 보존한 release로 자동 복원하고 `nginx -t`까지 확인한 다음, 종료 상태 1로 끝냅니다. 8번과 9번의 오리진 확인에서 문제를 발견한 경우처럼 스크립트가 끝난 뒤에 되돌려야 한다면 10번의 `rollback`을 직접 실행합니다. 러너에서 관측한 공개 경로 응답만 이상한 경우에는 되돌리지 않고, Cloudflare와 DNS 설정을 먼저 확인합니다.
 
 위 순서의 서버 측 구현은 `scripts/vm1-apply-nginx.sh` 하나에 모여 있습니다. `.github/workflows/deploy-nginx.yml` 워크플로와 `bngdrasil/deploy_vm1.sh`는 모두 파일을 staging 경로에 올린 다음 이 스크립트를 호출합니다. 두 진입점이 같은 구현을 사용하기 때문에 실패했을 때의 복원 동작도 서로 같습니다.
 

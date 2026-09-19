@@ -198,6 +198,18 @@ sudo /opt/bnbong/scripts/vm1-apply-nginx.sh rollback [<release>]
 
 `rsync --delete`는 새 릴리스에 없는 파일을 지우기 때문에, 동기화가 진행되는 짧은 순간에는 이미 받아 간 `index.html`이 삭제된 asset을 요청할 수 있다. Vite 빌드는 asset 이름에 내용 해시를 붙이므로 파일 이름이 겹치지는 않지만, 배포 직전에 페이지를 연 방문자는 새로고침이 필요할 수 있다. 무중단이 필요해지면 bind mount 대상을 `current-<app>` 링크로 바꾸고 링크를 원자적으로 교체하는 방식으로 개선할 수 있다. 다만 그렇게 하려면 `docker-compose.yml`의 mount 경로를 함께 바꾸어야 한다.
 
+### 5.8 smoke test의 판정 기준
+
+두 배포 워크플로의 smoke test는 GitHub 러너에서 공개 URL을 호출하지 않고, SSH로 VM1에 접속한 다음 VM1 안에서 Nginx에 직접 요청해서 결과를 판정한다. 요청 형태는 `curl -sk --resolve <호스트>:443:127.0.0.1 https://<호스트><경로>`이며, `--resolve`로 이름 해석을 루프백으로 고정하기 때문에 Cloudflare를 거치지 않는다. 운영 인증서가 Cloudflare origin certificate라서 공개 CA 체인으로는 검증되지 않으므로 `-k`를 함께 쓴다. 이 단계에서 확인하려는 대상은 인증서의 신뢰 관계가 아니라 각 vhost가 돌려주는 상태 코드와 헤더다.
+
+판정을 오리진으로 옮긴 이유는 GitHub 러너가 Cloudflare의 봇 챌린지를 받을 수 있기 때문이다. GitHub 호스티드 러너는 데이터센터 대역의 주소를 사용하므로, Cloudflare가 그 요청을 봇으로 판단하면 `HTTP 403`과 `cf-mitigated: challenge` 헤더를 가진 챌린지 페이지를 돌려준다. 이 응답은 오리진까지 도달하지 않은 결과이므로 Nginx가 실제로 어떤 헤더를 붙였는지 전혀 알려주지 못한다. 그래서 러너에서 관측한 공개 경로 응답은 판정에 사용하지 않는다.
+
+2026-09-19의 `deploy-nginx.yml` 실행이 실제로 이 문제를 겪었다. Nginx 적용은 정상이었고 VM1에서 오리진을 직접 확인하면 `admin.bnbong.com`의 딥링크가 `200`과 `Cache-Control: no-cache`를 함께 돌려주었는데, 러너가 받은 챌린지 페이지에는 그 헤더가 없어서 워크플로가 헤더 회귀로 오판하고 롤백을 안내했다.
+
+각 도메인에 기대하는 응답은 다음과 같다. `deploy-nginx.yml`은 `bnbong.com`과 `www`, `dashboard`, `admin`, `ambiw`, `overlock`의 루트에서 200을, `api`의 `/health`에서 200을, `monitoring`의 루트에서 200 또는 302를 기대한다. `monitoring`이 302를 허용하는 이유는 Grafana가 익명 접근을 허용하지 않을 때 로그인 화면으로 넘기기 때문이다. 이어서 admin의 SPA 딥링크 `/users`가 200과 함께 `Cache-Control: no-cache`, `X-Frame-Options`, `X-Content-Type-Options`를 모두 돌려주는지 확인한다. `deploy.yml`은 이번에 배포한 앱의 루트가 200인지, 그 응답에 `Cache-Control: no-cache`가 있는지, 그리고 `index.html`이 참조하는 `/assets/*.js` 경로 하나를 실제로 받아 보아 200인지 확인한다. 마지막 확인은 오래된 `index.html`이 남아 있거나 asset 동기화가 빠진 상태를 잡아내기 위한 것이다.
+
+러너에서 수행하는 공개 URL 확인도 그대로 남겨 두었지만, 그 결과는 참고 정보이며 배포를 실패시키지 않는다. 응답에 `cf-mitigated: challenge`가 있거나 403이면 챌린지 때문에 공개 경로를 확인하지 못했다는 경고만 남기고 넘어간다. 5xx가 돌아오면 경고와 함께 job summary에도 기록하는데, 오리진이 정상인 상태에서 관측된 5xx는 이번 배포가 아니라 Cloudflare나 DNS 쪽 문제일 가능성이 크므로 사람이 판단해야 하기 때문이다. 롤백 안내도 오리진 확인이 실패한 경우에만 출력한다.
+
 ## 6. Nginx 구성
 
 `nginx/nginx.conf`는 VM1에서 실행하는 운영 Nginx 설정이고, `nginx/snippets/`는 여러 vhost가 함께 쓰는 조각을 모아 둔다.

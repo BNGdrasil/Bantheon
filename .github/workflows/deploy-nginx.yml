@@ -72,10 +72,94 @@ jobs:
         ssh -i ~/.ssh/id_deploy "ubuntu@${VM1_HOST}" \
           "sudo /opt/bnbong/scripts/vm1-apply-nginx.sh"
 
-    - name: Smoke test (vhosts)
+    # Cloudflare는 GitHub 호스티드 러너의 데이터센터 IP를 봇으로 판단해서 403과
+    # cf-mitigated: challenge 헤더를 가진 챌린지 페이지를 돌려줄 수 있다. 그
+    # 응답은 오리진이 만든 것이 아니므로 Nginx 적용 결과를 판정하는 근거가 되지
+    # 못한다. 2026-09-19 배포에서 실제로 이 챌린지 응답 때문에 헤더 회귀로
+    # 오판했다. 그래서 판정은 아래처럼 VM1 안에서 수행한다.
+    - name: Smoke test (origin on VM1)
       run: |
         set -euo pipefail
+
+        # 도메인 입력은 원격 명령 문자열에 그대로 들어가므로 먼저 검사한다.
+        case "$DOMAIN_NAME" in
+          ''|*[!A-Za-z0-9.-]*)
+            echo "::error::domain 입력에 허용되지 않는 문자가 있습니다: $DOMAIN_NAME"
+            exit 1
+            ;;
+        esac
+
+        # --resolve 로 Cloudflare를 거치지 않고 루프백의 Nginx에 직접 요청한다.
+        # 인증서가 Cloudflare origin cert 라서 공개 CA 체인으로는 검증되지 않으므로
+        # -k 가 필요하다. 이 단계가 확인하는 대상은 인증서 신뢰 관계가 아니라 각
+        # vhost가 돌려주는 상태 코드와 헤더다.
+        if ssh -i ~/.ssh/id_deploy "ubuntu@${VM1_HOST}" "bash -s -- '${DOMAIN_NAME}'" <<'REMOTE'
+        set -uo pipefail
+        domain="$1"
         failed=0
+
+        probe() {
+          host="$1"
+          path="$2"
+          expected="$3"
+          # 연결 자체가 실패하면 curl이 "000"을 쓰고 0이 아닌 코드로 끝난다.
+          code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 15 \
+            --resolve "${host}:443:127.0.0.1" "https://${host}${path}" || true)"
+          code="${code:-000}"
+          for want in $expected; do
+            if [ "$code" = "$want" ]; then
+              echo "  origin https://${host}${path} -> ${code}"
+              return 0
+            fi
+          done
+          echo "::error::origin https://${host}${path} -> ${code} (기대한 코드: ${expected})"
+          failed=1
+        }
+
+        probe "${domain}" / 200
+        probe "www.${domain}" / 200
+        probe "dashboard.${domain}" / 200
+        probe "admin.${domain}" / 200
+        probe "ambiw.${domain}" / 200
+        probe "overlock.${domain}" / 200
+        probe "api.${domain}" /health 200
+        # Grafana는 익명 접근을 허용하지 않으면 로그인 화면으로 302를 돌려준다.
+        probe "monitoring.${domain}" / "200 302"
+
+        # SPA fallback 경로가 index.html을 돌려주면서 재검증 헤더와 보안 헤더를
+        # 함께 내보내는지 확인한다. 기준선 문서 6절 9번에 해당하는 검사다.
+        deep_host="admin.${domain}"
+        deep_path="/users"
+        deep="$(curl -sk -o /dev/null -D - --max-time 15 -w 'http_code=%{http_code}\n' \
+          --resolve "${deep_host}:443:127.0.0.1" "https://${deep_host}${deep_path}" || true)"
+        printf '%s\n' "$deep"
+        deep_code="$(printf '%s\n' "$deep" | sed -n 's/^http_code=//p' | tail -n 1)"
+        if [ "${deep_code:-000}" != "200" ]; then
+          echo "::error::origin https://${deep_host}${deep_path} -> ${deep_code:-000} (기대한 코드: 200)"
+          failed=1
+        fi
+        for pattern in '^cache-control:.*no-cache' '^x-frame-options:' '^x-content-type-options:'; do
+          if ! printf '%s\n' "$deep" | grep -qiE "$pattern"; then
+            echo "::error::admin SPA 딥링크 응답에 기대한 헤더가 없습니다: $pattern"
+            failed=1
+          fi
+        done
+
+        exit "$failed"
+        REMOTE
+        then
+          echo "오리진 확인을 모두 통과했습니다."
+        else
+          echo "::error::오리진 확인이 실패했습니다. 적용한 Nginx 설정에 문제가 있습니다."
+          echo "::error::복원: sudo /opt/bnbong/scripts/vm1-apply-nginx.sh rollback"
+          exit 1
+        fi
+
+    # 공개 경로 확인은 참고 정보이며 이 단계는 배포를 실패시키지 않는다. 러너가
+    # Cloudflare 챌린지를 받으면 오리진과 무관한 응답이 돌아오기 때문이다.
+    - name: Public path check through Cloudflare (reference only)
+      run: |
+        set -uo pipefail
 
         hosts="
         ${DOMAIN_NAME}
@@ -89,46 +173,23 @@ jobs:
         "
 
         for host in $hosts; do
-          code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "https://${host}/" || echo 000)"
+          resp="$(curl -sS -o /dev/null -D - --max-time 15 -w 'http_code=%{http_code}\n' "https://${host}/" || true)"
+          code="$(printf '%s\n' "$resp" | sed -n 's/^http_code=//p' | tail -n 1)"
+          code="${code:-000}"
+          if printf '%s\n' "$resp" | grep -qiE '^cf-mitigated:.*challenge' || [ "$code" = "403" ]; then
+            echo "::warning::Cloudflare 챌린지로 공개 경로 확인 불가, 오리진 확인 결과로 판정 (https://${host}/ -> ${code})"
+            continue
+          fi
           case "$code" in
-            2??|3??|401|403)
-              echo "  https://${host}/ -> $code"
+            5??)
+              echo "::warning::https://${host}/ -> ${code}. 오리진은 정상인데 Cloudflare 경유 경로에서 5xx가 관측되었습니다. Cloudflare 또는 DNS 쪽 문제일 수 있으므로 사람이 판단해야 합니다."
+              echo "Cloudflare 5xx: https://${host}/ -> ${code}" >> "$GITHUB_STEP_SUMMARY"
               ;;
             *)
-              echo "::error::https://${host}/ -> $code"
-              failed=1
+              echo "  https://${host}/ -> ${code} (참고)"
               ;;
           esac
         done
-
-        if [ "$failed" -ne 0 ]; then
-          echo "::error::일부 도메인이 정상 응답하지 않았습니다."
-          echo "::error::복원: sudo /opt/bnbong/scripts/vm1-apply-nginx.sh rollback"
-          exit 1
-        fi
-
-    - name: Smoke test (admin SPA deep link headers)
-      run: |
-        set -euo pipefail
-        # SPA fallback 경로가 index.html을 돌려주면서 재검증 헤더와 보안 헤더를
-        # 함께 내보내는지 확인한다. 기준선 문서 6절 9번에 해당하는 검사다.
-        url="https://admin.${DOMAIN_NAME}/deploy-smoke-$(date +%s)"
-        headers="$(curl -sSI --max-time 15 "$url" || true)"
-        printf '%s\n' "$headers"
-
-        failed=0
-        for pattern in '^cache-control:.*no-cache' '^x-frame-options:' '^x-content-type-options:'; do
-          if ! printf '%s' "$headers" | grep -qiE "$pattern"; then
-            echo "::error::admin SPA 딥링크 응답에 기대한 헤더가 없습니다: $pattern"
-            failed=1
-          fi
-        done
-
-        if [ "$failed" -ne 0 ]; then
-          echo "::error::헤더 회귀가 발견되었습니다."
-          echo "::error::복원: sudo /opt/bnbong/scripts/vm1-apply-nginx.sh rollback"
-          exit 1
-        fi
 
     - name: Remove SSH key
       if: always()
