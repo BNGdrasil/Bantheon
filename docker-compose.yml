@@ -7,6 +7,10 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # stub_status for nginx-prometheus-exporter. The host loopback prefix is
+      # required: without it Docker publishes 8080 on every interface and the
+      # metrics listener becomes reachable from outside VM1.
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/snippets:/etc/nginx/snippets:ro

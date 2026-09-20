@@ -126,6 +126,100 @@ jobs:
         # Grafana는 익명 접근을 허용하지 않으면 로그인 화면으로 302를 돌려준다.
         probe "monitoring.${domain}" / "200 302"
 
+        # Prometheus는 VM2 내부 docker 네트워크에서 직접 수집하므로, 공개
+        # vhost로 /metrics가 나가면 안 된다. 게이트웨이와 인증 서버, Grafana가
+        # 모두 인증 없이 이 경로를 노출하기 때문에 차단이 풀리면 곧바로
+        # 유출로 이어진다. 존재를 드러내지 않도록 403이 아니라 404를 기대한다.
+        for metrics_host in "api.${domain}" "admin.${domain}" "monitoring.${domain}" "overlock.${domain}"; do
+          probe "$metrics_host" /metrics 404
+          probe "$metrics_host" /metrics/ 404
+        done
+
+        # 위 네 vhost의 80 블록에는 443으로 보내는 redirect가 없다. Cloudflare가
+        # TLS를 종료하고 origin에는 평문 HTTP로 넘기므로(overlock.bnbong.com의
+        # 80 블록 주석 참고) 80 자체가 실제 트래픽 경로이고, deny-metrics.conf의
+        # location들이 곧바로 매치되어 443과 같은 404를 돌려준다. probe()는
+        # --resolve host:443과 https를 전제하므로 80/http용 함수를 따로 둔다.
+        probe80() {
+          host="$1"
+          path="$2"
+          expected="$3"
+          code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 15 \
+            --resolve "${host}:80:127.0.0.1" "http://${host}${path}" || true)"
+          code="${code:-000}"
+          for want in $expected; do
+            if [ "$code" = "$want" ]; then
+              echo "  origin http://${host}${path} -> ${code}"
+              return 0
+            fi
+          done
+          echo "::error::origin http://${host}${path} -> ${code} (기대한 코드: ${expected})"
+          failed=1
+        }
+
+        for metrics_host in "api.${domain}" "admin.${domain}" "monitoring.${domain}" "overlock.${domain}"; do
+          probe80 "$metrics_host" /metrics 404
+          probe80 "$metrics_host" /metrics/ 404
+        done
+
+        # 위 차단이 Grafana의 상태 확인 경로까지 가져가지 않았는지 함께 본다.
+        # 이 경로는 인증 없이 200과 JSON을 돌려준다.
+        probe "monitoring.${domain}" /api/health 200
+
+        # stub_status는 공개 vhost가 아니라 컨테이너의 8080에 있고, 그 포트는
+        # 호스트 loopback에만 게시된다. 이 단계는 VM1 안에서 실행되므로 아래
+        # 확인이 가능하다. probe()는 https와 443을 전제하기 때문에 평문 요청을
+        # 보내는 함수를 같은 형식으로 하나 더 둔다.
+        probe_local() {
+          path="$1"
+          expected="$2"
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+            "http://127.0.0.1:8080${path}" || true)"
+          code="${code:-000}"
+          for want in $expected; do
+            if [ "$code" = "$want" ]; then
+              echo "  origin http://127.0.0.1:8080${path} -> ${code}"
+              return 0
+            fi
+          done
+          echo "::error::origin http://127.0.0.1:8080${path} -> ${code} (기대한 코드: ${expected})"
+          failed=1
+        }
+
+        probe_local /stub_status 200
+        probe_local / 404
+
+        # 상태 코드만으로는 exporter가 읽을 내용이 실제로 들어 있는지 알 수 없다.
+        # nginx-prometheus-exporter는 첫 줄의 "Active connections"를 파싱한다.
+        stub_body="$(curl -s --max-time 15 http://127.0.0.1:8080/stub_status || true)"
+        if ! printf '%s\n' "$stub_body" | grep -q '^Active connections:'; then
+          echo "::error::stub_status 응답에 Active connections 줄이 없습니다."
+          printf '%s\n' "$stub_body" | head -n 5
+          failed=1
+        fi
+
+        # compose에서 "127.0.0.1:" 접두사가 빠지면 8080이 모든 인터페이스에
+        # 열린다. 그 회귀를 상태 코드로는 잡을 수 없으므로 바인딩 주소를 본다.
+        stub_bind="$(ss -lnt 2>/dev/null | awk '$4 ~ /:8080$/ {print $4}' || true)"
+        if [ -z "$stub_bind" ]; then
+          echo "::error::8080을 듣고 있는 소켓을 찾지 못했습니다. 포트 게시를 확인하시기 바랍니다."
+          failed=1
+        else
+          for bind in $stub_bind; do
+            # 대괄호는 case 패턴에서 문자 집합으로 해석되므로 IPv6 주소는
+            # 따옴표로 감싸서 문자 그대로 비교한다.
+            case "${bind%:8080}" in
+              127.0.0.1|'[::1]')
+                echo "  8080 바인딩 -> ${bind}"
+                ;;
+              *)
+                echo "::error::8080이 loopback 밖에 열려 있습니다: ${bind}"
+                failed=1
+                ;;
+            esac
+          done
+        fi
+
         # SPA fallback 경로가 index.html을 돌려주면서 재검증 헤더와 보안 헤더를
         # 함께 내보내는지 확인한다. 기준선 문서 6절 9번에 해당하는 검사다.
         deep_host="admin.${domain}"
