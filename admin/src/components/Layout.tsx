@@ -105,7 +105,11 @@ function Layout() {
             data-collapsed={navOpen ? 'false' : 'true'}
           >
             {NAVIGATION.map((item) => {
-              const isActive = location.pathname === item.href
+              // A detail screen under a section keeps that section marked as
+              // current, so /services/12 does not leave the menu without a
+              // highlighted entry.
+              const isActive =
+                location.pathname === item.href || location.pathname.startsWith(`${item.href}/`)
               return (
                 <Link key={item.href} to={item.href} aria-current={isActive ? 'page' : undefined}>
                   {item.name}

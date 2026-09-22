@@ -1,5 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
-import { OverviewStats, Service, fetchOverviewStats, fetchServices } from '../services/api'
+import {
+  OverviewStats,
+  Readiness,
+  Service,
+  fetchOverviewStats,
+  fetchReadiness,
+  fetchServices,
+} from '../services/api'
 import {
   ErrorPanel,
   FreshnessLine,
@@ -10,16 +17,28 @@ import {
 import { POLL_INTERVAL_MS, formatKst, useNow } from '../lib/datetime'
 import { HealthBadge } from '../components/HealthBadge'
 
-/**
- * Retired and unconfigured assets, kept as reviewed static text. The console
- * does not call OCI when the page opens, and a retired machine must not be
- * drawn as an ongoing outage.
- */
-const INFRA_HISTORY = [
-  { name: 'VM4', state: '미구성 예비', note: 'DB 미구성 자원입니다. 장애가 아닙니다.' },
-  { name: 'VM5 · VM6', state: '퇴역', note: '삭제 이력이 있으며 이후 게임 서버도 닫힌 상태입니다.' },
-  { name: 'MongoDB', state: '퇴역 예정', note: '아직 중지하거나 삭제하지 않았습니다.' },
-]
+/** Badge tone for one component of the readiness probe. */
+function readinessTone(value: string): string {
+  if (value === 'ok' || value === 'ready') {
+    return 'badge--success'
+  }
+  if (value === 'degraded') {
+    return 'badge--warning'
+  }
+  return 'badge--danger'
+}
+
+const READINESS_LABELS: Record<string, string> = {
+  ready: '준비됨',
+  not_ready: '준비되지 않음',
+  ok: '정상',
+  degraded: '적재되지 않음',
+  error: '연결 실패',
+}
+
+function readinessLabel(value: string): string {
+  return READINESS_LABELS[value] || value
+}
 
 function DashboardPage() {
   const now = useNow()
@@ -38,8 +57,114 @@ function DashboardPage() {
     refetchIntervalInBackground: false,
   })
 
+  // `/ready` answers 503 with a body that explains which dependency failed, so
+  // a 503 is a reading and not a failed request. Only a network error or an
+  // unexpected status lands in the error branch. Retries are off because the
+  // poll already repeats the call, and a retry would delay a bad reading.
+  const readinessQuery = useQuery<Readiness>({
+    queryKey: ['gateway-readiness'],
+    queryFn: fetchReadiness,
+    refetchInterval: POLL_INTERVAL_MS,
+    refetchIntervalInBackground: false,
+    retry: false,
+  })
+
   const stats = overviewQuery.data
   const services = servicesQuery.data
+  const readiness = readinessQuery.data
+
+  const readinessSection = (
+    <section className="section">
+      <div className="section-head">
+        <div>
+          <p className="eyebrow">Gateway readiness</p>
+          <h2 className="section-title">게이트웨이 준비 상태</h2>
+        </div>
+        <FreshnessLine
+          dataUpdatedAt={readinessQuery.dataUpdatedAt}
+          now={now}
+          isFetching={readinessQuery.isFetching}
+          label="준비 상태 갱신"
+        />
+      </div>
+
+      <p className="detail spaced-bottom">
+        게이트웨이 루트의 <span className="mono">/ready</span> 응답입니다. 위의 등록부 카드는 관리자
+        API의 개요 통계에서 온 값이라 출처가 다르며, 두 값을 하나로 합쳐 보여주지 않습니다.
+      </p>
+
+      {readinessQuery.isLoading ? (
+        <LoadingPanel message="준비 상태를 확인하는 중입니다." />
+      ) : readinessQuery.isError || !readiness ? (
+        <ErrorPanel
+          title="준비 상태를 확인하지 못했습니다"
+          error={readinessQuery.error}
+          fallbackMessage="게이트웨이 준비 상태를 가져오지 못했습니다"
+          onRetry={() => readinessQuery.refetch()}
+        />
+      ) : (
+        <>
+          <div className="card-grid">
+            <article className="card">
+              <p className="eyebrow">Status</p>
+              <p className="metric-value metric-value--text">{readinessLabel(readiness.status)}</p>
+              <div className="badge-row">
+                <span className={`badge ${readinessTone(readiness.status)}`}>
+                  {readiness.status === 'ready' ? '정상' : '확인 필요'}
+                </span>
+                <span className="detail mono">{readiness.status}</span>
+              </div>
+              <p className="metric-note">
+                데이터베이스와 등록부가 모두 정상일 때만 준비됨으로 응답합니다.
+              </p>
+            </article>
+
+            <article className="card">
+              <p className="eyebrow">Database</p>
+              <p className="metric-value metric-value--text">{readinessLabel(readiness.database)}</p>
+              <div className="badge-row">
+                <span className={`badge ${readinessTone(readiness.database)}`}>
+                  {readiness.database === 'ok' ? '연결됨' : '확인 필요'}
+                </span>
+              </div>
+              <p className="metric-note">게이트웨이가 방금 데이터베이스 연결을 확인한 결과입니다.</p>
+            </article>
+
+            <article className="card">
+              <p className="eyebrow">Registry</p>
+              <p className="metric-value metric-value--text">{readinessLabel(readiness.registry)}</p>
+              <div className="badge-row">
+                <span className={`badge ${readinessTone(readiness.registry)}`}>
+                  {readiness.registry === 'ok' ? '정상' : '확인 필요'}
+                </span>
+              </div>
+              <p className="metric-note">등록부가 게이트웨이 프로세스에 적재되어 있는지를 뜻합니다.</p>
+            </article>
+
+            <article className="card">
+              <p className="eyebrow">Service count</p>
+              <p className="metric-value">{readiness.service_count}</p>
+              <p className="metric-note">
+                <span className="mono">/ready</span>가 센 적재 서비스 수입니다.
+              </p>
+            </article>
+          </div>
+
+          {readiness.database_error && (
+            <NoticePanel tone="error" title="데이터베이스 오류">
+              <p className="mono break-all">{readiness.database_error}</p>
+            </NoticePanel>
+          )}
+
+          {readiness.registry_error && (
+            <NoticePanel tone="error" title="등록부 오류">
+              <p className="mono break-all">{readiness.registry_error}</p>
+            </NoticePanel>
+          )}
+        </>
+      )}
+    </section>
+  )
 
   const header = (
     <div className="page-head">
@@ -78,6 +203,9 @@ function DashboardPage() {
           fallbackMessage="개요 통계를 가져오지 못했습니다"
           onRetry={() => overviewQuery.refetch()}
         />
+        {/* Readiness comes from a different endpoint, so it is still worth
+            showing when the admin API call fails. */}
+        {readinessSection}
       </div>
     )
   }
@@ -127,7 +255,8 @@ function DashboardPage() {
             <span className="detail mono">{registry.loaded_services}건 적재</span>
           </div>
           <p className="metric-note">
-            등록부는 DB의 서비스 정의를 게이트웨이 프로세스에 반영한 결과입니다.
+            등록부는 DB의 서비스 정의를 게이트웨이 프로세스에 반영한 결과입니다. 이 카드의 값은
+            관리자 API의 개요 통계에서 왔습니다.
           </p>
         </article>
 
@@ -140,6 +269,8 @@ function DashboardPage() {
           <p className="metric-note">실행 중인 Bifrost 게이트웨이의 버전과 환경입니다.</p>
         </article>
       </div>
+
+      {readinessSection}
 
       <section className="section">
         <div className="section-head">
@@ -236,29 +367,6 @@ function DashboardPage() {
         </div>
       </section>
 
-      <section className="section">
-        <div className="section-head">
-          <div>
-            <p className="eyebrow">Lifecycle</p>
-            <h2 className="section-title">인프라 이력</h2>
-          </div>
-        </div>
-        <div className="card card--soft">
-          <p className="detail">
-            아래 항목은 검토된 정적 기록입니다. 퇴역과 미구성은 장애가 아니며 실시간 조회 결과도
-            아닙니다.
-          </p>
-          <div className="definition-list spaced-top">
-            {INFRA_HISTORY.map((item) => (
-              <div key={item.name}>
-                <p className="definition-term mono">{item.name}</p>
-                <p className="subsection-title">{item.state}</p>
-                <p className="detail">{item.note}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
     </div>
   )
 }

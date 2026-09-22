@@ -35,6 +35,12 @@ jobs:
       working-directory: ./${{ matrix.app }}
       run: npm ci
 
+    # Lint runs before the build so a style or hook violation is reported on
+    # its own instead of being hidden behind a compile error.
+    - name: Lint (${{ matrix.app }})
+      working-directory: ./${{ matrix.app }}
+      run: npm run lint
+
     - name: Build (${{ matrix.app }})
       working-directory: ./${{ matrix.app }}
       run: npm run build

@@ -1,4 +1,5 @@
 import { FormEvent, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   HealthCheckAllResult,
@@ -180,7 +181,7 @@ function ServicesPage() {
         <h1 className="page-title">서비스</h1>
         <p className="page-lead">
           등록 상태와 실제 관측 상태를 나눠서 표시합니다. 등록은 게이트웨이 DB가 원본이며, 등록부
-          적재는 별도 작업입니다.
+          적재는 별도 작업입니다. 서비스 이름을 누르면 상세 화면에서 수정과 삭제를 할 수 있습니다.
         </p>
       </div>
       <FreshnessLine
@@ -399,7 +400,9 @@ function ServicesPage() {
                 {visibleServices.map((service) => (
                   <tr key={service.id}>
                     <td>
-                      <span className="row-name">{service.display_name || service.name}</span>
+                      <Link className="row-name row-link" to={`/services/${service.id}`}>
+                        {service.display_name || service.name}
+                      </Link>
                       <div className="detail mono">{service.name}</div>
                       {service.description && <div className="detail">{service.description}</div>}
                     </td>

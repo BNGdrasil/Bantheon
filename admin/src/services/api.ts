@@ -94,6 +94,54 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Field name of one validation item. `loc` is the path into the request, so
+ * the last string that is not the body marker is the field the operator has
+ * to correct. An index (a number) is skipped: "0" names nothing on screen.
+ */
+function validationField(loc: unknown): string | null {
+  if (!Array.isArray(loc)) {
+    return null
+  }
+  for (let index = loc.length - 1; index >= 0; index -= 1) {
+    const part = loc[index]
+    if (typeof part === 'string' && part !== 'body' && part.trim() !== '') {
+      return part
+    }
+  }
+  return null
+}
+
+/**
+ * Turns a FastAPI 422 body into one readable line.
+ *
+ * `detail` is a list of `{type, loc, msg, input, ctx}` there, and dropping it
+ * would leave axios' own "Request failed with status code 422" on screen,
+ * which says nothing about the field the server refused. Items that carry no
+ * usable `msg` are skipped rather than rendered as blanks; if nothing is left
+ * the caller falls back to its own text.
+ */
+function extractValidationDetail(items: unknown[]): string | null {
+  const messages: string[] = []
+  for (const item of items) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+    const rawMessage = (item as { msg?: unknown }).msg
+    if (typeof rawMessage !== 'string') {
+      continue
+    }
+    // pydantic prefixes every ValueError it raises; the prefix is noise here.
+    const message = rawMessage.replace(/^Value error,\s*/, '').trim()
+    if (message === '') {
+      continue
+    }
+    const field = validationField((item as { loc?: unknown }).loc)
+    messages.push(field ? `${field}: ${message}` : message)
+  }
+  return messages.length > 0 ? messages.join('; ') : null
+}
+
 function extractDetail(data: unknown): string | null {
   if (typeof data === 'string' && data.trim() !== '') {
     return data
@@ -102,6 +150,12 @@ function extractDetail(data: unknown): string | null {
     const detail = (data as { detail?: unknown }).detail
     if (typeof detail === 'string') {
       return detail
+    }
+    if (Array.isArray(detail)) {
+      const validationDetail = extractValidationDetail(detail)
+      if (validationDetail) {
+        return validationDetail
+      }
     }
     const message = (data as { message?: unknown }).message
     if (typeof message === 'string') {
@@ -383,6 +437,36 @@ export interface ServiceCreateRequest {
   description: string
 }
 
+/**
+ * Fields `ServiceUpdate` accepts. `name` is absent on purpose: the server
+ * schema does not take it, so the routing key cannot be renamed here. Only the
+ * keys that actually changed are sent, because the server applies
+ * `exclude_unset` and an omitted key means "leave as is".
+ */
+export interface ServiceUpdateRequest {
+  display_name?: string | null
+  url?: string
+  health_check_path?: string
+  timeout_seconds?: number
+  rate_limit_per_minute?: number
+  is_active?: boolean
+  description?: string | null
+  service_metadata?: Record<string, unknown> | null
+}
+
+/**
+ * Stored health of one service. The endpoint that serves this reads the last
+ * persisted record; it does not probe the upstream, so every rendering of it
+ * has to be labelled as a past observation.
+ */
+export interface ServiceHealthStatusResponse {
+  service_id: number
+  service_name: string
+  health_status: HealthStatus
+  last_health_check: string | null
+  is_active: boolean
+}
+
 export interface ActionResponse {
   message?: string
 }
@@ -424,6 +508,20 @@ export interface OverviewStats {
   users: null
   api_requests: null
   system: null
+}
+
+/**
+ * Gateway readiness. Served by `/ready` on the gateway root, not by the admin
+ * API. The two error strings are only present when the matching dependency
+ * failed.
+ */
+export interface Readiness {
+  status: string
+  database: string
+  registry: string
+  service_count: number
+  database_error?: string | null
+  registry_error?: string | null
 }
 
 /** Effective gateway configuration. Read-only: `editable_at_runtime` is false. */
@@ -482,8 +580,43 @@ export async function fetchServiceStats(): Promise<ServiceStats> {
   return response.data
 }
 
+export async function fetchService(serviceId: number): Promise<Service> {
+  const response = await adminApi.get<Service>(`/services/${serviceId}`)
+  return response.data
+}
+
 export async function createService(payload: ServiceCreateRequest): Promise<Service> {
   const response = await adminApi.post<Service>('/services', payload)
+  return response.data
+}
+
+/** Partial update. The server reloads the routing table before answering. */
+export async function updateService(
+  serviceId: number,
+  payload: ServiceUpdateRequest
+): Promise<Service> {
+  const response = await adminApi.put<Service>(`/services/${serviceId}`, payload)
+  return response.data
+}
+
+/** Removes the service from the database and from the routing table (204). */
+export async function deleteService(serviceId: number): Promise<void> {
+  await adminApi.delete(`/services/${serviceId}`)
+}
+
+/**
+ * Reads the stored health record of one service.
+ *
+ * The gateway endpoint behind this returns the last persisted status and does
+ * not contact the upstream, so the screen must not present the answer as a
+ * fresh probe. `POST /services/health-check-all` is the call that probes.
+ */
+export async function fetchServiceHealth(
+  serviceId: number
+): Promise<ServiceHealthStatusResponse> {
+  const response = await adminApi.get<ServiceHealthStatusResponse>(
+    `/services/${serviceId}/health`
+  )
   return response.data
 }
 
@@ -497,6 +630,39 @@ export async function reloadServiceRegistry(): Promise<ReloadResult> {
 export async function runHealthCheckAll(): Promise<HealthCheckAllResult> {
   const response = await adminApi.post<HealthCheckAllResult>('/services/health-check-all')
   return response.data
+}
+
+/* -- Readiness (gateway root, not the admin API) ------------------- */
+
+/**
+ * The readiness probe lives on the gateway root and takes no credentials, so
+ * it uses its own client: the admin interceptors would attach a token and
+ * would treat an answer as a session problem.
+ */
+const readinessApi: AxiosInstance = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 30000,
+})
+
+/**
+ * Reads `/ready`.
+ *
+ * A gateway that is not ready answers 503 with the very body that explains
+ * why. Letting axios reject that status would throw the explanation away, so
+ * 503 is accepted here and the caller renders the payload. Any other status,
+ * and any network failure, still rejects.
+ */
+export async function fetchReadiness(): Promise<Readiness> {
+  const response = await readinessApi.get<Readiness>('/ready', {
+    validateStatus: (status) => status === 200 || status === 503,
+  })
+  const data = response.data
+  if (!data || typeof data !== 'object' || typeof data.status !== 'string') {
+    // A proxy error page instead of the probe body. Reporting it as an error
+    // is honest; rendering it as a status would invent a reading.
+    throw new ApiError('준비 상태 응답을 해석하지 못했습니다.', response.status, null)
+  }
+  return data
 }
 
 /* -- Users (gateway proxy to the auth server) ---------------------- */

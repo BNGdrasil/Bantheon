@@ -24,25 +24,37 @@ export function Dialog({
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const openerRef = useRef<HTMLElement | null>(null)
+  const closeDisabledRef = useRef(closeDisabled)
+  closeDisabledRef.current = closeDisabled
 
   useEffect(() => {
     openerRef.current = document.activeElement as HTMLElement | null
     const first = containerRef.current?.querySelector<HTMLElement>(FOCUSABLE)
-    first?.focus()
+    ;(first ?? containerRef.current)?.focus()
 
     return () => {
       openerRef.current?.focus?.()
     }
   }, [])
 
-  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'Escape') {
-      if (!closeDisabled) {
+  // Escape is bound on `document` rather than the backdrop's onKeyDown so it
+  // fires no matter where focus is inside the dialog, not just when the
+  // backdrop itself is the keydown target.
+  useEffect(() => {
+    const handleDocumentKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && !closeDisabledRef.current) {
         event.stopPropagation()
         onClose()
       }
-      return
     }
+
+    document.addEventListener('keydown', handleDocumentKeyDown)
+    return () => {
+      document.removeEventListener('keydown', handleDocumentKeyDown)
+    }
+  }, [onClose])
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'Tab') {
       return
     }
@@ -82,6 +94,7 @@ export function Dialog({
       aria-modal="true"
       aria-labelledby={labelledBy}
       ref={containerRef}
+      tabIndex={-1}
       onKeyDown={handleKeyDown}
     >
       {content}

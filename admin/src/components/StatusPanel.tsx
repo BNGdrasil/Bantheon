@@ -16,6 +16,9 @@ export const NOT_COLLECTED_LABEL = '미수집'
  * Renders a counter the server may report as null. `0` stays `0` because it is
  * a real observation; null becomes the not-collected label.
  */
+// This helper states the not-collected convention the panels below render, so
+// it stays in the same file. The rule only guards dev-server fast refresh.
+// eslint-disable-next-line react-refresh/only-export-components
 export function formatMetric(value: number | null | undefined, suffix = ''): string {
   if (value === null || value === undefined) {
     return NOT_COLLECTED_LABEL
@@ -63,6 +66,9 @@ export function NoticePanel({
 }
 
 /** Tone and text for one failed request, keyed by what the server answered. */
+// ErrorPanel below is the primary caller, so the mapping stays next to the
+// panel that renders it. The rule only guards dev-server fast refresh.
+// eslint-disable-next-line react-refresh/only-export-components
 export function describeError(error: unknown, fallbackMessage: string): {
   tone: PanelTone
   message: string

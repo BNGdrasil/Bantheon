@@ -5,6 +5,7 @@ import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import UsersPage from './pages/UsersPage'
 import ServicesPage from './pages/ServicesPage'
+import ServiceDetailPage from './pages/ServiceDetailPage'
 import ObservabilityPage from './pages/ObservabilityPage'
 import SettingsPage from './pages/SettingsPage'
 
@@ -18,6 +19,7 @@ function App() {
           <Route path="dashboard" element={<DashboardPage />} />
           <Route path="users" element={<UsersPage />} />
           <Route path="services" element={<ServicesPage />} />
+          <Route path="services/:id" element={<ServiceDetailPage />} />
           <Route path="observability" element={<ObservabilityPage />} />
           <Route path="logs" element={<Navigate to="/observability" replace />} />
           <Route path="settings" element={<SettingsPage />} />

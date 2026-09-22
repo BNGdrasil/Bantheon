@@ -17,15 +17,17 @@ npm run dev -- --host
 `admin/.env.local`에 로컬 환경 변수를 둡니다. 형식은 `admin/env.example`을 따릅니다. 값을 지정하지 않으면 `admin/src/services/api.ts`가 운영 주소(`https://api.bnbong.com`)를 기본값으로 사용합니다.
 
 ```bash
-# Bidar 인증 서버로 직접 요청을 보내는 주소
-VITE_API_BASE_URL=http://localhost:8001
+# 인증(/auth/*)과 게이트웨이 준비 상태(/ready)를 함께 호출하는 주소
+VITE_API_BASE_URL=http://api.localhost:8080
 
 # Bifrost 게이트웨이가 중계하는 관리자 API 주소
-VITE_ADMIN_API_BASE_URL=http://localhost:8000/admin/api
+VITE_ADMIN_API_BASE_URL=http://api.localhost:8080/admin/api
 
 # 관측 화면이 링크만 거는 Grafana 주소
 VITE_GRAFANA_URL=https://monitoring.bnbong.com
 ```
+
+`VITE_API_BASE_URL` 하나로 Bidar의 `/auth/*`와 Bifrost의 `/ready`를 모두 호출하기 때문에, 이 값에는 컨테이너 포트가 아니라 로컬 인그레스 주소를 적어야 합니다. 인그레스가 `/auth` 요청만 Bidar로 분기하고 나머지 요청은 Bifrost로 넘겨 주므로, 관리자 패널을 실행할 때에는 아래에서 설명하는 `ui` 프로필을 함께 띄워야 합니다.
 
 ## 루트 워크스페이스와 함께 실행
 
@@ -35,7 +37,7 @@ BNGdrasil 루트 워크스페이스에서 백엔드까지 함께 띄우려면, �
 docker compose --profile ui up -d
 ```
 
-이 프로필은 `local/nginx.local.conf`를 사용하는 Nginx 컨테이너를 `127.0.0.1:8080`에 띄웁니다. `api.localhost:8080`은 컨테이너로 뜬 Bifrost 게이트웨이로 프록시되고, `admin.localhost:8080`은 호스트에서 직접 실행 중인 admin Vite 개발 서버(`host.docker.internal:5174`)로 프록시됩니다. 따라서 이 ingress를 사용하려면 `admin/` 디렉터리에서 `npm run dev -- --host`를 먼저 실행해 두어야 합니다.
+이 프로필은 `local/nginx.local.conf`를 사용하는 Nginx 컨테이너를 `127.0.0.1:8080`에 띄웁니다. `api.localhost:8080`은 컨테이너로 뜬 Bifrost 게이트웨이로 프록시되고, 그중 `/auth` 경로만 Bidar 인증 서버로 분기됩니다. 이 분기 방식은 운영 환경의 `api.bnbong.com` 설정과 동일합니다. `admin.localhost:8080`은 호스트에서 직접 실행 중인 admin Vite 개발 서버(`host.docker.internal:5174`)로 프록시됩니다. 따라서 이 ingress를 사용하려면 `admin/` 디렉터리에서 `npm run dev -- --host`를 먼저 실행해 두어야 합니다.
 
 ## 빌드
 

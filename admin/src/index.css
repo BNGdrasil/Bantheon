@@ -385,6 +385,19 @@ a {
   word-break: break-word;
 }
 
+/* Stored JSON, shown as it is kept rather than reformatted into prose. */
+.code-block {
+  margin: 6px 0 0;
+  padding: 12px 14px;
+  background: var(--soft);
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
 /* ---------------------------------------------------------------- */
 /* Badges                                                            */
 /* ---------------------------------------------------------------- */
@@ -544,6 +557,12 @@ a {
 
 .data-table .row-name {
   font-weight: 600;
+}
+
+/* The row name doubles as the entry point to the detail screen. */
+.data-table a.row-link {
+  display: inline-block;
+  color: var(--accent-strong);
 }
 
 .cell-actions {

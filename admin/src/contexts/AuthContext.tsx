@@ -104,6 +104,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   )
 }
 
+// The hook and the provider share one context object that is deliberately not
+// exported, so they cannot be split into separate modules. The rule only
+// guards dev-server fast refresh.
+// eslint-disable-next-line react-refresh/only-export-components
 export function useAuth() {
   const context = useContext(AuthContext)
   if (context === undefined) {
