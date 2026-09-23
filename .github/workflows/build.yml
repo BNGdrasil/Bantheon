@@ -56,7 +56,7 @@ jobs:
     # The artifact name carries the commit SHA so a static release can be
     # identified and rolled back by revision instead of by build order.
     - name: Upload build artifacts (${{ matrix.app }})
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ matrix.app }}-dist-${{ github.sha }}
         path: ${{ matrix.app }}/dist/
