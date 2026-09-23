@@ -1,5 +1,5 @@
-import { FormEvent, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   HealthCheckAllResult,
@@ -25,6 +25,7 @@ import {
 import { HealthBadge, ProbeBadge } from '../components/HealthBadge'
 import { POLL_INTERVAL_MS, formatKst, useNow } from '../lib/datetime'
 import { Dialog } from '../components/Dialog'
+import { RegistryOutcomeNotice, describeRegistryOutcome } from '../lib/registry'
 
 const EMPTY_SERVICE: ServiceCreateRequest = {
   name: '',
@@ -55,15 +56,30 @@ const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
 const URL_POLICY_HINT =
   '등록할 수 있는 주소는 http 또는 https이며, 루프백 주소와 클라우드 메타데이터 주소는 거절됩니다.'
 
+/** Shape of the hand-over the detail screen puts in the history entry. */
+interface ServicesLocationState {
+  registryNotice?: RegistryOutcomeNotice
+}
+
 function ServicesPage() {
   const queryClient = useQueryClient()
   const now = useNow()
+  const location = useLocation()
+  const navigate = useNavigate()
 
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [showAdd, setShowAdd] = useState(false)
   const [newService, setNewService] = useState<ServiceCreateRequest>(EMPTY_SERVICE)
   const [notice, setNotice] = useState<string | null>(null)
+  // A write that saved the record but failed to reload the registry answers
+  // 207, which axios accepts as a success, so this is held apart from `notice`
+  // and never drawn with the success tone. A delete also finishes here, because
+  // the record it was about is gone, so the detail screen hands its outcome
+  // over in the history entry.
+  const [registryNotice, setRegistryNotice] = useState<RegistryOutcomeNotice | null>(
+    () => (location.state as ServicesLocationState | null)?.registryNotice ?? null
+  )
   const [actionError, setActionError] = useState<string | null>(null)
   const [probeResult, setProbeResult] = useState<HealthCheckAllResult | null>(null)
   const [probeRanAt, setProbeRanAt] = useState<number | null>(null)
@@ -82,6 +98,14 @@ function ServicesPage() {
     refetchIntervalInBackground: false,
   })
 
+  // The handed-over notice belongs to that one navigation. Dropping it from the
+  // history entry keeps it from reappearing on a reload or a back button.
+  useEffect(() => {
+    if (location.state) {
+      navigate(location.pathname, { replace: true, state: null })
+    }
+  }, [location.state, location.pathname, navigate])
+
   /** Re-reads the server state so a write is confirmed by the store, not assumed. */
   const refreshServices = async () => {
     await queryClient.invalidateQueries({ queryKey: ['admin-services'] })
@@ -93,6 +117,9 @@ function ServicesPage() {
     mutationFn: reloadServiceRegistry,
     onSuccess: async (result) => {
       setActionError(null)
+      // The reload is exactly the retry a failed write asks for, so its success
+      // clears that warning instead of leaving it next to a success message.
+      setRegistryNotice(null)
       setNotice(`${result.message} · 등록부에 ${result.service_count}건을 적재했습니다.`)
       await refreshServices()
     },
@@ -127,13 +154,15 @@ function ServicesPage() {
     mutationFn: (payload: ServiceCreateRequest) => createService(payload),
     onSuccess: async (service) => {
       setActionError(null)
-      setNotice(`${service.name} 서비스를 등록했습니다. 등록부 반영은 다시 적재 후 확인하세요.`)
+      setNotice(null)
+      setRegistryNotice(describeRegistryOutcome('create', service.name, service))
       setShowAdd(false)
       setNewService(EMPTY_SERVICE)
       await refreshServices()
     },
     onError: () => {
       setNotice(null)
+      setRegistryNotice(null)
     },
   })
 
@@ -211,6 +240,15 @@ function ServicesPage() {
         </NoticePanel>
       )}
 
+      {registryNotice && (
+        <NoticePanel tone={registryNotice.tone} title={registryNotice.title}>
+          <p>{registryNotice.message}</p>
+          {registryNotice.error && (
+            <p className="mono break-all spaced-top-sm">{registryNotice.error}</p>
+          )}
+        </NoticePanel>
+      )}
+
       {actionError && (
         <NoticePanel tone="error" title="작업이 실패했습니다">
           <p>{actionError}</p>
@@ -223,6 +261,7 @@ function ServicesPage() {
           className="btn btn--primary"
           onClick={() => {
             setActionError(null)
+            setRegistryNotice(null)
             addMutation.reset()
             setShowAdd(true)
           }}

@@ -137,6 +137,11 @@ a {
   margin-bottom: 18px;
 }
 
+/* Separates a badge from the value it qualifies on the same line. */
+.spaced-left-sm {
+  margin-left: 8px;
+}
+
 .login-error {
   margin-top: 18px;
   margin-bottom: 0;

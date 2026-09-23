@@ -25,6 +25,7 @@ import {
 import { HealthBadge, ProbeBadge } from '../components/HealthBadge'
 import { POLL_INTERVAL_MS, formatKst, useNow } from '../lib/datetime'
 import { Dialog } from '../components/Dialog'
+import { RegistryOutcomeNotice, describeRegistryOutcome } from '../lib/registry'
 
 /**
  * The gateway rejects a target URL that points at loopback, a metadata service
@@ -139,7 +140,10 @@ function ServiceDetailPage() {
   const [showDelete, setShowDelete] = useState(false)
   const [form, setForm] = useState<EditForm | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
+  // Outcome of the last write. A reload that failed answers 207, which axios
+  // accepts as a success, so the tone comes from the body rather than the
+  // status code.
+  const [registryNotice, setRegistryNotice] = useState<RegistryOutcomeNotice | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [probeResult, setProbeResult] = useState<HealthCheckAllResult | null>(null)
   const [probeRanAt, setProbeRanAt] = useState<number | null>(null)
@@ -183,28 +187,33 @@ function ServiceDetailPage() {
     mutationFn: (payload: ServiceUpdateRequest) => updateService(serviceId, payload),
     onSuccess: async (updated) => {
       setActionError(null)
-      setNotice(`${updated.name} 서비스를 수정했습니다. 게이트웨이 등록부도 함께 다시 적재됩니다.`)
+      setRegistryNotice(describeRegistryOutcome('update', updated.name, updated))
       setShowEdit(false)
       await refreshAll()
     },
     onError: () => {
-      setNotice(null)
+      setRegistryNotice(null)
     },
   })
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteService(serviceId),
-    onSuccess: async () => {
+    onSuccess: async (result) => {
       setShowDelete(false)
       await queryClient.invalidateQueries({ queryKey: ['admin-services'] })
       await queryClient.invalidateQueries({ queryKey: ['admin-services-stats'] })
       await queryClient.invalidateQueries({ queryKey: ['overview-stats'] })
       queryClient.removeQueries({ queryKey: ['admin-service', serviceId] })
       queryClient.removeQueries({ queryKey: ['admin-service-health', serviceId] })
-      navigate('/services', { replace: true })
+      // The record this screen was about no longer exists, so the outcome is
+      // handed to the list screen rather than shown on a page about to unmount.
+      navigate('/services', {
+        replace: true,
+        state: { registryNotice: describeRegistryOutcome('delete', result.service_name, result) },
+      })
     },
     onError: (error: unknown) => {
-      setNotice(null)
+      setRegistryNotice(null)
       setActionError(describeError(error, '서비스를 삭제하지 못했습니다').message)
     },
   })
@@ -215,13 +224,11 @@ function ServiceDetailPage() {
     mutationFn: runHealthCheckAll,
     onSuccess: async (result) => {
       setActionError(null)
-      setNotice(null)
       setProbeResult(result)
       setProbeRanAt(Date.now())
       await refreshAll()
     },
     onError: (error: unknown) => {
-      setNotice(null)
       setProbeResult(null)
       setActionError(describeError(error, '상태 검사를 실행하지 못했습니다').message)
     },
@@ -271,7 +278,8 @@ function ServiceDetailPage() {
         <h1 className="page-title">{service ? service.display_name || service.name : '서비스 상세'}</h1>
         <p className="page-lead">
           게이트웨이 데이터베이스에 저장된 등록 내용입니다. 수정과 삭제는 저장 직후 등록부를 다시
-          적재하므로 라우팅 표에 곧바로 반영됩니다.
+          적재합니다. 적재에 실패하면 저장한 내용은 그대로 남고 라우팅 표만 이전 상태에 머물며, 그
+          사실을 이 화면이 알려 줍니다.
         </p>
         <p className="spaced-top-sm">
           <Link to="/services">서비스 목록으로 돌아가기</Link>
@@ -334,9 +342,17 @@ function ServiceDetailPage() {
     <div>
       {header}
 
-      {notice && (
-        <NoticePanel tone="success" title="작업을 마쳤습니다">
-          <p>{notice}</p>
+      {registryNotice && (
+        <NoticePanel tone={registryNotice.tone} title={registryNotice.title}>
+          <p>{registryNotice.message}</p>
+          {registryNotice.error && (
+            <p className="mono break-all spaced-top-sm">{registryNotice.error}</p>
+          )}
+          {!registryNotice.reloaded && (
+            <p className="spaced-top-sm">
+              <Link to="/services">서비스 목록으로 이동해 등록부 다시 적재 실행</Link>
+            </p>
+          )}
         </NoticePanel>
       )}
 
@@ -359,6 +375,7 @@ function ServiceDetailPage() {
           disabled={!canManage || isWriting}
           onClick={() => {
             setActionError(null)
+            setRegistryNotice(null)
             setFormError(null)
             updateMutation.reset()
             setForm(toForm(service))
@@ -373,7 +390,6 @@ function ServiceDetailPage() {
           disabled={!canManage || isWriting}
           onClick={() => {
             setActionError(null)
-            setNotice(null)
             setShowDelete(true)
           }}
         >
@@ -703,8 +719,10 @@ function ServiceDetailPage() {
             </div>
             <p>
               {service.name} 서비스를 등록에서 지우고 게이트웨이 등록부를 다시 적재합니다. 적재가
-              끝나는 즉시 이 서비스로 가던 게이트웨이 경유 요청은 404를 받습니다. 삭제한 등록은
-              되돌릴 수 없으며 같은 내용을 다시 등록해야 합니다.
+              끝나는 즉시 이 서비스로 가던 게이트웨이 경유 요청은 404를 받습니다. 적재에 실패하면
+              등록만 사라지고 게이트웨이는 지워진 서비스로 계속 요청을 넘기며, 그때는 목록 화면의
+              등록부 다시 적재로 해소해야 합니다. 삭제한 등록은 되돌릴 수 없으며 같은 내용을 다시
+              등록해야 합니다.
             </p>
             <p className="detail spaced-top-sm">
               대상 서버 자체는 그대로 있습니다. 게이트웨이를 거치지 않는 경로로는 계속 접근할 수

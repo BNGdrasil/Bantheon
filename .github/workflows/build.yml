@@ -41,6 +41,14 @@ jobs:
       working-directory: ./${{ matrix.app }}
       run: npm run lint
 
+    # Only the admin console has a test suite. The step is skipped for the
+    # client rather than made conditional inside a script, so a missing run is
+    # visible in the job summary instead of passing silently.
+    - name: Test (${{ matrix.app }})
+      if: matrix.app == 'admin'
+      working-directory: ./${{ matrix.app }}
+      run: npm test
+
     - name: Build (${{ matrix.app }})
       working-directory: ./${{ matrix.app }}
       run: npm run build

@@ -7,6 +7,7 @@ import UsersPage from './pages/UsersPage'
 import ServicesPage from './pages/ServicesPage'
 import ServiceDetailPage from './pages/ServiceDetailPage'
 import ObservabilityPage from './pages/ObservabilityPage'
+import BackupsPage from './pages/BackupsPage'
 import SettingsPage from './pages/SettingsPage'
 
 function App() {
@@ -20,6 +21,7 @@ function App() {
           <Route path="users" element={<UsersPage />} />
           <Route path="services" element={<ServicesPage />} />
           <Route path="services/:id" element={<ServiceDetailPage />} />
+          <Route path="backups" element={<BackupsPage />} />
           <Route path="observability" element={<ObservabilityPage />} />
           <Route path="logs" element={<Navigate to="/observability" replace />} />
           <Route path="settings" element={<SettingsPage />} />

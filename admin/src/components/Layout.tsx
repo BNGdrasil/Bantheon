@@ -7,6 +7,7 @@ const NAVIGATION = [
   { name: '운영 개요', href: '/dashboard' },
   { name: '서비스', href: '/services' },
   { name: '사용자', href: '/users' },
+  { name: '백업', href: '/backups' },
   { name: '관측', href: '/observability' },
   { name: '운영 설정', href: '/settings' },
 ]

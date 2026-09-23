@@ -121,7 +121,7 @@ function validationField(loc: unknown): string | null {
  * usable `msg` are skipped rather than rendered as blanks; if nothing is left
  * the caller falls back to its own text.
  */
-function extractValidationDetail(items: unknown[]): string | null {
+export function extractValidationDetail(items: unknown[]): string | null {
   const messages: string[] = []
   for (const item of items) {
     if (!item || typeof item !== 'object') {
@@ -142,7 +142,7 @@ function extractValidationDetail(items: unknown[]): string | null {
   return messages.length > 0 ? messages.join('; ') : null
 }
 
-function extractDetail(data: unknown): string | null {
+export function extractDetail(data: unknown): string | null {
   if (typeof data === 'string' && data.trim() !== '') {
     return data
   }
@@ -238,7 +238,12 @@ function redirectToLogin(): void {
   }
 }
 
-const api: AxiosInstance = axios.create({
+/**
+ * Auth and gateway-root client. Exported by name as well as by default so a
+ * test can point `defaults.baseURL` at a local server; nothing else about it
+ * changes.
+ */
+export const api: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
   timeout: 30000,
 })
@@ -455,6 +460,103 @@ export interface ServiceUpdateRequest {
 }
 
 /**
+ * Outcome of the registry reload that follows every service write.
+ *
+ * The server commits the database change first and reloads the routing table
+ * afterwards. A failed reload is not rolled back, so the record is stored while
+ * the gateway still routes by the previous snapshot. That case answers 207 with
+ * `registry_reloaded: false`, which axios treats as a success because 207 is a
+ * 2xx; only these two fields tell the screen that half the operation failed.
+ */
+export interface RegistryReloadOutcome {
+  registry_reloaded: boolean
+  registry_error: string | null
+}
+
+/**
+ * Create and update response. Every `ServiceRead` field is still present, so
+ * the record can be read from it exactly as before.
+ */
+export type ServiceWriteResult = Service & RegistryReloadOutcome
+
+/**
+ * Delete response. The endpoint answers 200 with this body rather than 204,
+ * because a 204 has no place to report a reload that failed after the row was
+ * already removed.
+ */
+export interface ServiceDeleteResult extends RegistryReloadOutcome {
+  service_id: number
+  service_name: string
+}
+
+/**
+ * Backup state of one component, as last reported to Prometheus.
+ *
+ * Every measured field is optional. A component that has never written a
+ * metric reports null there, and null is not zero: the offsite shipping
+ * component publishes no unshipped counter at all, so a zero on that row would
+ * claim "nothing is waiting" for a value nobody ever measured.
+ *
+ * `last_run_status` follows `bngdrasil_backup_last_run_status`, where 0 means
+ * the last run succeeded and 1 means it failed.
+ */
+export interface BackupComponentStatus {
+  component: string
+  instance: string | null
+  job: string | null
+  last_success_timestamp: number | null
+  last_run_timestamp: number | null
+  last_run_status: number | null
+  unshipped_total: number | null
+  age_seconds: number | null
+}
+
+/** Summary of every backup component Prometheus currently knows about. */
+export interface BackupObservability {
+  /** False when Prometheus answered but holds no backup series yet. */
+  available: boolean
+  queried_at: string
+  components: BackupComponentStatus[]
+  note: string | null
+}
+
+/**
+ * Outcome of the optional Alertmanager lookup. The firing alerts are correct
+ * without it, so a failed lookup is reported here instead of failing the call.
+ */
+export interface AlertmanagerStatus {
+  configured: boolean
+  available: boolean
+  error: string | null
+}
+
+/**
+ * One alert Prometheus reports as firing. `silenced` and `inhibited` are null
+ * when Alertmanager was not consulted, so an unknown suppression state is never
+ * rendered as "not suppressed".
+ */
+export interface FiringAlert {
+  alertname: string
+  severity: string | null
+  instance: string | null
+  service: string | null
+  job: string | null
+  component: string | null
+  active_at: string | null
+  summary: string | null
+  silenced: boolean | null
+  inhibited: boolean | null
+}
+
+/** Summary of the alerts that are firing right now. */
+export interface AlertsObservability {
+  queried_at: string
+  firing_count: number
+  alerts: FiringAlert[]
+  alertmanager: AlertmanagerStatus
+}
+
+/**
  * Stored health of one service. The endpoint that serves this reads the last
  * persisted record; it does not probe the upstream, so every rendering of it
  * has to be labelled as a past observation.
@@ -585,23 +687,37 @@ export async function fetchService(serviceId: number): Promise<Service> {
   return response.data
 }
 
-export async function createService(payload: ServiceCreateRequest): Promise<Service> {
-  const response = await adminApi.post<Service>('/services', payload)
+/**
+ * Registers a service and reloads the routing table.
+ *
+ * A reload that fails answers 207, which axios accepts as a success, so the
+ * caller has to read `registry_reloaded` to tell the two apart.
+ */
+export async function createService(
+  payload: ServiceCreateRequest
+): Promise<ServiceWriteResult> {
+  const response = await adminApi.post<ServiceWriteResult>('/services', payload)
   return response.data
 }
 
-/** Partial update. The server reloads the routing table before answering. */
+/** Partial update. Reports the registry reload outcome like `createService`. */
 export async function updateService(
   serviceId: number,
   payload: ServiceUpdateRequest
-): Promise<Service> {
-  const response = await adminApi.put<Service>(`/services/${serviceId}`, payload)
+): Promise<ServiceWriteResult> {
+  const response = await adminApi.put<ServiceWriteResult>(`/services/${serviceId}`, payload)
   return response.data
 }
 
-/** Removes the service from the database and from the routing table (204). */
-export async function deleteService(serviceId: number): Promise<void> {
-  await adminApi.delete(`/services/${serviceId}`)
+/**
+ * Removes the service from the database and from the routing table.
+ *
+ * The endpoint answers 200 with a body, not 204, so a reload that failed after
+ * the row was deleted can still be reported. The body is returned unchanged.
+ */
+export async function deleteService(serviceId: number): Promise<ServiceDeleteResult> {
+  const response = await adminApi.delete<ServiceDeleteResult>(`/services/${serviceId}`)
+  return response.data
 }
 
 /**
@@ -632,6 +748,30 @@ export async function runHealthCheckAll(): Promise<HealthCheckAllResult> {
   return response.data
 }
 
+/* -- Observability summaries --------------------------------------- */
+
+/**
+ * Backup state per component, read from Prometheus by the gateway.
+ *
+ * The gateway answers 501 when `PROMETHEUS_URL` is unset and 502 when
+ * Prometheus could not be read. Neither is turned into an empty summary here:
+ * both reject, and the screen states which one happened.
+ */
+export async function fetchBackupObservability(): Promise<BackupObservability> {
+  const response = await adminApi.get<BackupObservability>('/observability/backups')
+  return response.data
+}
+
+/**
+ * Alerts that are firing right now. A failed Alertmanager lookup does not fail
+ * this call; it lands in the `alertmanager` field with the suppression flags
+ * left null.
+ */
+export async function fetchAlertObservability(): Promise<AlertsObservability> {
+  const response = await adminApi.get<AlertsObservability>('/observability/alerts')
+  return response.data
+}
+
 /* -- Readiness (gateway root, not the admin API) ------------------- */
 
 /**
@@ -639,7 +779,7 @@ export async function runHealthCheckAll(): Promise<HealthCheckAllResult> {
  * it uses its own client: the admin interceptors would attach a token and
  * would treat an answer as a session problem.
  */
-const readinessApi: AxiosInstance = axios.create({
+export const readinessApi: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
   timeout: 30000,
 })

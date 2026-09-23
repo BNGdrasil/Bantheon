@@ -16,6 +16,7 @@ import {
 } from '../components/StatusPanel'
 import { POLL_INTERVAL_MS, formatKst, useNow } from '../lib/datetime'
 import { HealthBadge } from '../components/HealthBadge'
+import FiringAlerts from '../components/FiringAlerts'
 
 /** Badge tone for one component of the readiness probe. */
 function readinessTone(value: string): string {
@@ -184,10 +185,14 @@ function DashboardPage() {
     </div>
   )
 
+  // The alert section owns its own query, so it renders on its own whether the
+  // overview counters and the readiness probe succeeded or failed. A firing
+  // alert must not vanish because a different endpoint is down.
   if (overviewQuery.isLoading) {
     return (
       <div>
         {header}
+        <FiringAlerts />
         <LoadingPanel message="개요를 불러오는 중입니다." />
       </div>
     )
@@ -197,6 +202,7 @@ function DashboardPage() {
     return (
       <div>
         {header}
+        <FiringAlerts />
         <ErrorPanel
           title="개요를 불러오지 못했습니다"
           error={overviewQuery.error}
@@ -215,6 +221,8 @@ function DashboardPage() {
   return (
     <div>
       {header}
+
+      <FiringAlerts />
 
       {!registry.ready && (
         <NoticePanel tone="warning" title="서비스 등록부가 준비되지 않았습니다">
