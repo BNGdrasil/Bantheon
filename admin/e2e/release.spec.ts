@@ -34,13 +34,46 @@ test('상세 화면이 마지막 프로브가 읽은 업스트림 빌드를 보�
   await expect(health.getByText(/관측 시각 2026\. 09\. 28\. 10:00:00 KST/)).toBeVisible()
 })
 
-test('프로브한 적이 없는 서비스는 그 사실을 적고, 상태 검사 뒤에 빌드를 채운다', async ({
+test('비활성 서비스는 프로브 대상이 아니라고 적고, 상태 검사 뒤에도 비어 있다', async ({
   page,
 }) => {
   await page.goto('/services/3')
   await expect(page.getByRole('heading', { name: 'sandbox', level: 1 })).toBeVisible()
 
+  // The registry snapshot is built from the active rows alone, so this service
+  // is registered and not routed, and the screen says that rather than
+  // suggesting a probe would fill the block.
   const health = page.locator('section').filter({ hasText: '마지막으로 기록된 상태' })
+  await expect(
+    health.getByText('이 서비스는 비활성으로 등록되어 있어서 게이트웨이 등록부에 적재되지 않습니다.')
+  ).toBeVisible()
+
+  await page.getByRole('button', { name: '전체 서비스 상태 검사' }).click()
+
+  await expect(
+    page.getByText('이 서비스는 비활성으로 등록되어 있어서 검사 대상이 아닙니다.')
+  ).toBeVisible()
+  // The run covered the two active services only.
+  await expect(page.getByText('대상 2건.')).toBeVisible()
+  await expect(health.getByText('0123456789ab', { exact: true })).toHaveCount(0)
+})
+
+test('등록부를 다시 적재하면 관측한 빌드가 사라지고, 상태 검사가 다시 채운다', async ({
+  page,
+}) => {
+  await page.goto('/services/1')
+  await expect(page.getByRole('heading', { name: '인증 서버', level: 1 })).toBeVisible()
+
+  const health = page.locator('section').filter({ hasText: '마지막으로 기록된 상태' })
+  await expect(health.getByText('deadbeefcafe', { exact: true })).toBeVisible()
+
+  // The gateway keeps the observed build in the snapshot it swaps out, so a
+  // reload leaves nothing to report until the next probe runs.
+  await page.goto('/services')
+  await page.getByRole('button', { name: '등록부 다시 적재' }).click()
+  await expect(page.getByText('등록부에 2건을 적재했습니다.')).toBeVisible()
+
+  await page.goto('/services/1')
   await expect(
     health.getByText('이 서비스는 빌드 정보를 보고하지 않거나 아직 프로브하지 않았습니다.')
   ).toBeVisible()
@@ -49,14 +82,10 @@ test('프로브한 적이 없는 서비스는 그 사실을 적고, 상태 검�
 
   // The run answers with `details`, so the observed build lands on screen
   // without waiting for the next poll of the stored record.
-  const sha = health.getByText('0123456789ab', { exact: true })
+  const sha = health.getByText('deadbeefcafe', { exact: true })
   await expect(sha).toBeVisible()
-  await expect(sha).toHaveAttribute('title', '0123456789abcdef0123456789abcdef01234567')
-  await expect(health.getByText('v0.1.0', { exact: true })).toBeVisible()
-  await expect(health.getByText('2026. 09. 27. 19:00:00 KST', { exact: true })).toBeVisible()
-  await expect(
-    health.getByText('이 서비스는 빌드 정보를 보고하지 않거나 아직 프로브하지 않았습니다.')
-  ).toHaveCount(0)
+  await expect(sha).toHaveAttribute('title', 'deadbeefcafe0123456789abcdef0123456789ab')
+  await expect(health.getByText('main', { exact: true })).toBeVisible()
 })
 
 test('업스트림이 빌드를 보고하지 않으면 검사한 뒤에도 그 사실을 그대로 적는다', async ({

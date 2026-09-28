@@ -1,9 +1,8 @@
-import { FormEvent, useMemo, useState } from 'react'
+import { FormEvent, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ApiKey,
   ApiKeyCreateRequest,
-  ApiKeyCreated,
   User,
   createApiKey,
   fetchApiKeys,
@@ -21,7 +20,16 @@ import {
   describeError,
 } from '../components/StatusPanel'
 import { POLL_INTERVAL_MS, formatKst, useNow } from '../lib/datetime'
-import { describeApiKeyState, isUsableApiKey, localInputToUtcIso, ownerLabel } from '../lib/apikeys'
+import {
+  ApiKeyWithheld,
+  describeApiKeyState,
+  describeExpiryInput,
+  isUsableApiKey,
+  issueWithheldPlaintext,
+  localInputToUtcIso,
+  ownerLabel,
+  rotateWithheldPlaintext,
+} from '../lib/apikeys'
 import { Dialog } from '../components/Dialog'
 
 /* ------------------------------------------------------------------ *
@@ -29,8 +37,12 @@ import { Dialog } from '../components/Dialog'
  *
  * The plaintext key exists once, in the response that issued or rotated it.
  * It is held in React state and nowhere else: not in local storage, not in the
- * address bar, not in a console line. Closing the panel that shows it drops
- * the value, so the panel asks for a confirmation first.
+ * address bar, not in a console line, and not in the mutation cache either.
+ * TanStack Query stores what a `mutationFn` resolves with, so the two writes
+ * that receive a plaintext hand it to a ref inside the `mutationFn` and
+ * resolve with the record alone; `takePlaintext` in `lib/apikeys` is where
+ * that split happens. Closing the panel that shows the value drops it, so the
+ * panel asks for a confirmation first.
  * ------------------------------------------------------------------ */
 
 const ALL_OWNERS = 'all'
@@ -44,7 +56,10 @@ type PlaintextOrigin = 'issue' | 'rotate'
 
 interface RevealedKey {
   origin: PlaintextOrigin
-  result: ApiKeyCreated
+  /** Every field except the plaintext, which is the part that may be cached. */
+  record: ApiKeyWithheld
+  /** The plaintext itself, held here and nowhere else. */
+  plaintext: string
 }
 
 /** A write waiting for confirmation, with the effect spelled out. */
@@ -56,18 +71,20 @@ const NO_OVERLAP_NOTE =
 function describeAction(
   action: PendingAction,
   owner: string
-): { title: string; effect: string; confirm: string } {
+): { title: string; effect: string; confirm: string; failureTitle: string } {
   if (action.kind === 'rotate') {
     return {
       title: '키를 회전합니다',
       effect: `${action.key.key_name} 키를 회전합니다. 새 키가 발급되는 순간 구 키는 즉시 거절되며, 이름과 소유자(${owner}), 만료 시각은 새 키가 그대로 물려받습니다.`,
       confirm: '회전',
+      failureTitle: '키를 회전하지 못했습니다',
     }
   }
   return {
     title: '키를 폐기합니다',
     effect: `${action.key.key_name} 키를 폐기합니다. 폐기는 되돌릴 수 없고, 이 키를 사용하는 호출자는 즉시 401을 받습니다. 기록은 남으므로 목록에서 폐기된 키로 계속 보입니다.`,
     confirm: '폐기',
+    failureTitle: '키를 폐기하지 못했습니다',
   }
 }
 
@@ -123,8 +140,19 @@ function ApiKeysPage() {
   const [revealed, setRevealed] = useState<RevealedKey | null>(null)
   const [confirmingClose, setConfirmingClose] = useState(false)
   const [pending, setPending] = useState<PendingAction | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
   const [actionNotice, setActionNotice] = useState<string | null>(null)
+
+  // The hand-off between the `mutationFn`, which must not resolve with the
+  // plaintext, and the state that renders it. The ref is written inside the
+  // request and read once in `onSuccess`, which empties it again, so the value
+  // lives in exactly one place at any moment and disappears with the page.
+  const plaintextRef = useRef<string | null>(null)
+
+  const takeHeldPlaintext = () => {
+    const held = plaintextRef.current ?? ''
+    plaintextRef.current = null
+    return held
+  }
 
   // Role gating here is a convenience. The gateway and the auth server decide
   // every write again, and their answer is what the screen reports.
@@ -161,20 +189,19 @@ function ApiKeysPage() {
     await queryClient.invalidateQueries({ queryKey: ['admin-api-keys'] })
   }
 
-  const onMutationError = (fallback: string) => (error: unknown) => {
-    setActionNotice(null)
-    setActionError(describeError(error, fallback).message)
-  }
-
   const issueMutation = useMutation({
-    mutationFn: (payload: ApiKeyCreateRequest) => createApiKey(payload),
-    onSuccess: async (result) => {
-      setActionError(null)
+    // The plaintext is moved into the ref here, inside the request, and what
+    // the mutation resolves with is the record without it. That resolved value
+    // is what TanStack Query keeps, so the cache never holds key material.
+    mutationFn: issueWithheldPlaintext(createApiKey, (plaintext) => {
+      plaintextRef.current = plaintext
+    }),
+    onSuccess: async (record) => {
       setActionNotice(null)
       setShowIssue(false)
       setForm(EMPTY_FORM)
       setConfirmingClose(false)
-      setRevealed({ origin: 'issue', result })
+      setRevealed({ origin: 'issue', record, plaintext: takeHeldPlaintext() })
       await refreshKeys()
     },
     // The issue dialog stays open on a failure and renders the reason itself,
@@ -184,27 +211,30 @@ function ApiKeysPage() {
   })
 
   const rotateMutation = useMutation({
-    mutationFn: (keyId: number) => rotateApiKey(keyId),
-    onSuccess: async (result) => {
-      setActionError(null)
+    mutationFn: rotateWithheldPlaintext(rotateApiKey, (plaintext) => {
+      plaintextRef.current = plaintext
+    }),
+    onSuccess: async (record) => {
       setActionNotice(null)
       setPending(null)
       setConfirmingClose(false)
-      setRevealed({ origin: 'rotate', result })
+      setRevealed({ origin: 'rotate', record, plaintext: takeHeldPlaintext() })
       await refreshKeys()
     },
-    onError: onMutationError('키를 회전하지 못했습니다'),
+    // The confirmation dialog stays open and prints the reason itself, the
+    // same way the issue dialog does, so the refusal is read next to the
+    // button that provoked it instead of at the top of the page.
+    onError: () => setActionNotice(null),
   })
 
   const revokeMutation = useMutation({
     mutationFn: (keyId: number) => revokeApiKey(keyId),
     onSuccess: async (result) => {
-      setActionError(null)
       setActionNotice(`${result.key_name} 키를 폐기했습니다.`)
       setPending(null)
       await refreshKeys()
     },
-    onError: onMutationError('키를 폐기하지 못했습니다'),
+    onError: () => setActionNotice(null),
   })
 
   const isWriting =
@@ -221,12 +251,25 @@ function ApiKeysPage() {
     }
   }
 
+  /** Opens the confirmation, with the previous refusal cleared out of it. */
+  const openPending = (action: PendingAction) => {
+    setActionNotice(null)
+    rotateMutation.reset()
+    revokeMutation.reset()
+    setPending(action)
+  }
+
+  const closePending = () => {
+    setPending(null)
+    rotateMutation.reset()
+    revokeMutation.reset()
+  }
+
   const handleIssue = (event: FormEvent) => {
     event.preventDefault()
     if (issueMutation.isPending) {
       return
     }
-    setActionError(null)
     const payload: ApiKeyCreateRequest = {
       key_name: form.key_name.trim(),
       user_id: Number(form.user_id),
@@ -277,35 +320,19 @@ function ApiKeysPage() {
     )
   }
 
-  if (keysQuery.isLoading) {
-    return (
-      <div>
-        {header}
-        <LoadingPanel message="API 키 목록을 불러오는 중입니다." />
-      </div>
-    )
-  }
-
-  if (keysQuery.isError || !keysQuery.data) {
-    return (
-      <div>
-        {header}
-        <ErrorPanel
-          title="API 키 목록을 불러오지 못했습니다"
-          error={keysQuery.error}
-          fallbackMessage="API 키 목록을 가져오지 못했습니다"
-          onRetry={() => keysQuery.refetch()}
-        />
-      </div>
-    )
-  }
-
-  const keys = keysQuery.data
+  // A failed list query replaces the list and nothing else. Returning early
+  // here would rebuild the whole tree, and the plaintext panel below lives in
+  // that tree: a refresh that failed while the panel was open would take the
+  // one copy of the key off the screen without the operator closing it.
+  const keys = keysQuery.data ?? []
+  const listFailed = keysQuery.isError || !keysQuery.data
   const visibleKeys = activeOnly ? keys.filter((key) => isUsableApiKey(key, now)) : keys
   const users = usersQuery.data ?? []
   const pendingDetail = pending
     ? describeAction(pending, ownerLabel(pending.key.user_id, usernames))
     : null
+  const pendingMutation = pending?.kind === 'rotate' ? rotateMutation : revokeMutation
+  const expiryPreview = describeExpiryInput(form.expires_at)
 
   return (
     <div>
@@ -314,12 +341,6 @@ function ApiKeysPage() {
       {actionNotice && (
         <NoticePanel tone="success" title="변경을 반영했습니다">
           <p>{actionNotice}</p>
-        </NoticePanel>
-      )}
-
-      {actionError && (
-        <NoticePanel tone="error" title="요청이 거절되었습니다">
-          <p>{actionError}</p>
         </NoticePanel>
       )}
 
@@ -382,8 +403,8 @@ function ApiKeysPage() {
           type="button"
           className="btn btn--primary"
           onClick={() => {
-            setActionError(null)
             setActionNotice(null)
+            issueMutation.reset()
             setShowIssue(true)
           }}
           disabled={!canManage || isWriting}
@@ -399,12 +420,23 @@ function ApiKeysPage() {
         >
           {keysQuery.isFetching ? '불러오는 중' : '다시 불러오기'}
         </button>
-        <span className="detail">
-          표시 {visibleKeys.length}건 / 조회 {keys.length}건
-        </span>
+        {!keysQuery.isLoading && !listFailed && (
+          <span className="detail">
+            표시 {visibleKeys.length}건 / 조회 {keys.length}건
+          </span>
+        )}
       </div>
 
-      {visibleKeys.length === 0 ? (
+      {keysQuery.isLoading ? (
+        <LoadingPanel message="API 키 목록을 불러오는 중입니다." />
+      ) : listFailed ? (
+        <ErrorPanel
+          title="API 키 목록을 불러오지 못했습니다"
+          error={keysQuery.error}
+          fallbackMessage="API 키 목록을 가져오지 못했습니다"
+          onRetry={() => keysQuery.refetch()}
+        />
+      ) : visibleKeys.length === 0 ? (
         <div className="state-block">
           <p className="state-block-title">표시할 API 키가 없습니다</p>
           <p>
@@ -455,11 +487,7 @@ function ApiKeysPage() {
                           title={
                             key.is_active ? undefined : '폐기된 키는 회전할 수 없습니다'
                           }
-                          onClick={() => {
-                            setActionError(null)
-                            setActionNotice(null)
-                            setPending({ kind: 'rotate', key })
-                          }}
+                          onClick={() => openPending({ kind: 'rotate', key })}
                         >
                           회전
                         </button>
@@ -469,11 +497,7 @@ function ApiKeysPage() {
                           aria-label={`${key.key_name} 폐기`}
                           disabled={!canManage || !key.is_active || isWriting}
                           title={key.is_active ? undefined : '이미 폐기된 키입니다'}
-                          onClick={() => {
-                            setActionError(null)
-                            setActionNotice(null)
-                            setPending({ kind: 'revoke', key })
-                          }}
+                          onClick={() => openPending({ kind: 'revoke', key })}
                         >
                           폐기
                         </button>
@@ -494,17 +518,23 @@ function ApiKeysPage() {
       </p>
 
       {pending && pendingDetail && (
-        <Dialog
-          labelledBy="key-confirm-title"
-          onClose={() => setPending(null)}
-          closeDisabled={isWriting}
-        >
+        <Dialog labelledBy="key-confirm-title" onClose={closePending} closeDisabled={isWriting}>
           <>
             <div className="modal-head">
               <h2 className="modal-title" id="key-confirm-title">
                 {pendingDetail.title}
               </h2>
             </div>
+
+            {/* The refusal belongs next to the button that provoked it. The
+                dialog stays open on a failure, so the operator reads the
+                reason and the target record in one place. */}
+            {pendingMutation.isError && (
+              <NoticePanel tone="error" title={pendingDetail.failureTitle}>
+                <p>{describeError(pendingMutation.error, pendingDetail.failureTitle).message}</p>
+              </NoticePanel>
+            )}
+
             <div className="confirm-summary">
               <p className="subsection-title">대상</p>
               <p className="mono">
@@ -522,12 +552,7 @@ function ApiKeysPage() {
               >
                 {isWriting ? '처리 중' : pendingDetail.confirm}
               </button>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => setPending(null)}
-                disabled={isWriting}
-              >
+              <button type="button" className="btn" onClick={closePending} disabled={isWriting}>
                 취소
               </button>
             </div>
@@ -608,6 +633,18 @@ function ApiKeysPage() {
                   이 입력은 브라우저의 현지 시각으로 읽고 UTC로 바꾸어 보냅니다. 비워 두면 만료가
                   없는 키를 발급하며, 서버는 과거 시각을 거절합니다.
                 </span>
+                {/* Summer time makes one local reading nonexistent and another
+                    ambiguous, and the input has no zone to settle it with. The
+                    converted instant is therefore stated back before the
+                    request goes out. */}
+                {expiryPreview && (
+                  <p className="field-hint" data-testid="expiry-preview">
+                    이 시각을 <span className="mono">{expiryPreview.utcIso}</span> 값으로 보냅니다.
+                    한국 표준시로는 {expiryPreview.kst}입니다. 현지 시각이 서머타임 경계에 걸려
+                    있으면 브라우저가 전환 직전의 시차로 해석하므로, 표시된 값을 확인하고 발급하시기
+                    바랍니다.
+                  </p>
+                )}
               </div>
             </div>
 
@@ -652,17 +689,17 @@ function ApiKeysPage() {
             <div className="confirm-summary">
               <p className="subsection-title">대상</p>
               <p className="mono">
-                {revealed.result.key_name} · ID {revealed.result.id} ·{' '}
-                {ownerLabel(revealed.result.user_id, usernames)}
+                {revealed.record.key_name} · ID {revealed.record.id} ·{' '}
+                {ownerLabel(revealed.record.user_id, usernames)}
               </p>
               <p className="detail">
-                만료 {formatKst(revealed.result.expires_at, '만료 없음')} · 접두{' '}
-                {revealed.result.key_prefix}
+                만료 {formatKst(revealed.record.expires_at, '만료 없음')} · 접두{' '}
+                {revealed.record.key_prefix}
               </p>
             </div>
 
             <p className="subsection-title">평문 키</p>
-            <PlaintextKey value={revealed.result.key} />
+            <PlaintextKey value={revealed.plaintext} />
 
             {revealed.origin === 'rotate' && (
               <p className="spaced-top-sm">

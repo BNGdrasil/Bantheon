@@ -74,14 +74,17 @@ function SettingsPage() {
     })
 
   // The console's own build, read from the static marker next to the bundle.
-  // The file never changes while the page is open and a missing file is an
-  // answer rather than a failure, so this query neither retries nor refetches.
+  // An answer, whether it is a marker or the absence of one, never changes
+  // while the page is open, so it is held for the whole session. A request
+  // that failed on the way is not an answer: `fetchConsoleRelease` throws it
+  // instead of resolving with null, and this query retries it rather than
+  // fixing "not recorded" on the screen until the page is reloaded.
   const releaseQuery = useQuery<ConsoleRelease | null>({
     queryKey: ['console-release'],
     queryFn: fetchConsoleRelease,
-    staleTime: Infinity,
+    staleTime: (query) => (query.state.status === 'success' ? Infinity : 0),
     gcTime: Infinity,
-    retry: false,
+    retry: 2,
   })
 
   const release = releaseQuery.data ?? null
@@ -104,6 +107,13 @@ function SettingsPage() {
 
       {releaseQuery.isLoading ? (
         <LoadingPanel message="콘솔 빌드 정보를 불러오는 중입니다." />
+      ) : releaseQuery.isError ? (
+        <ErrorPanel
+          title="콘솔 빌드 정보를 불러오지 못했습니다"
+          error={releaseQuery.error}
+          fallbackMessage="release.json 요청이 완료되지 않았습니다"
+          onRetry={() => releaseQuery.refetch()}
+        />
       ) : release ? (
         <div className="card">
           <div className="definition-list">

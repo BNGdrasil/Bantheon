@@ -234,6 +234,23 @@ function offsetFromNow(ms) {
 }
 
 /**
+ * Reads an instant the client sent for `expires_at`.
+ *
+ * Bidar declares the column without a time zone and pydantic hands it a naive
+ * datetime, so a value that carries no zone suffix is stored as UTC rather
+ * than as the server's local time. `new Date` would read such a string as
+ * local time instead, which would move the expiry by the mock host's offset
+ * and make a test pass or fail depending on where it ran.
+ */
+function parseIncomingInstant(value) {
+  if (typeof value !== 'string') {
+    return new Date(NaN)
+  }
+  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value)
+  return new Date(hasZone ? value : `${value}Z`)
+}
+
+/**
  * A new plaintext key: the prefix plus 43 base64url characters, which is what
  * `secrets.token_urlsafe(32)` produces on the server.
  */
@@ -318,6 +335,18 @@ function reset() {
  * but the upstream published no build fields, because the gateway only
  * records the observation time together with a build it actually read.
  */
+/**
+ * The rows the registry snapshot holds.
+ *
+ * `ServiceRegistry._build_snapshot` reads `get_all_active_services`, so an
+ * inactive row is registered in the database and absent from the routing
+ * table. Everything that walks the snapshot, which is the health check and
+ * the reload count, walks this list rather than the whole registration list.
+ */
+function registeredServices() {
+  return services.filter((service) => service.is_active)
+}
+
 function observedBuild(serviceName) {
   const observed = observedBuilds[serviceName]
   if (!observed) {
@@ -498,6 +527,8 @@ function validationItems(payload) {
  */
 function reloadOutcome(successStatus) {
   if (mode.registryReload === 'fail') {
+    // The snapshot was not replaced, so whatever the last probes observed is
+    // still in the process that holds it.
     return {
       status: 207,
       fields: {
@@ -506,6 +537,10 @@ function reloadOutcome(successStatus) {
       },
     }
   }
+  // A successful reload swaps in a snapshot built from the database, and the
+  // observed builds were never in the database, so they are gone with the old
+  // snapshot exactly as they are in the gateway.
+  observedBuilds = {}
   return { status: successStatus, fields: { registry_reloaded: true, registry_error: null } }
 }
 
@@ -754,10 +789,16 @@ function handleServices(req, res, pathname, rawBody) {
   }
 
   if (pathname === '/admin/api/services/reload' && req.method === 'POST') {
+    // A reload builds a new snapshot out of the database, and the build each
+    // probe observed lives in the snapshot rather than in a table. So the
+    // gateway loses every observation on a reload and reports nothing again
+    // until the next probe runs; `ServiceRegistry._load` in
+    // bifrost/src/services/services.py is where that swap happens.
+    observedBuilds = {}
     sendJson(res, 200, {
       message: '등록부를 다시 적재했습니다.',
       status: 'ok',
-      service_count: services.length,
+      service_count: registeredServices().length,
     })
     return true
   }
@@ -766,7 +807,11 @@ function handleServices(req, res, pathname, rawBody) {
     const results = {}
     const details = {}
     const observedAt = nowIso()
-    for (const service of services) {
+    // Only the registry snapshot is probed, and that snapshot is built from
+    // the active rows alone. An inactive service is therefore absent from the
+    // answer rather than present with a status, which is what the console has
+    // to tell apart from a service that was probed and reported nothing.
+    for (const service of registeredServices()) {
       results[service.name] = service.health_status === 'unhealthy' ? 'unhealthy' : 'healthy'
       // The probe reads the upstream's health body, so what it observes is
       // recorded here exactly as the gateway records it: a build only when the
@@ -785,7 +830,7 @@ function handleServices(req, res, pathname, rawBody) {
     // build provenance travels in the separate `details` map.
     sendJson(res, 200, {
       message: 'health check completed',
-      service_count: services.length,
+      service_count: Object.keys(results).length,
       results,
       details,
     })
@@ -956,7 +1001,7 @@ function apiKeyValidationItems(payload) {
     })
   }
   if (payload.expires_at !== undefined && payload.expires_at !== null) {
-    const expiry = new Date(payload.expires_at)
+    const expiry = parseIncomingInstant(payload.expires_at)
     if (Number.isNaN(expiry.getTime()) || expiry.getTime() <= Date.now()) {
       items.push({
         type: 'value_error',
@@ -1050,7 +1095,9 @@ function handleApiKeys(req, res, pathname, rawBody, searchParams) {
     const { row, plaintext } = issueApiKey({
       keyName: payload.key_name.trim(),
       userId: owner.id,
-      expiresAt: payload.expires_at ? naiveUtc(new Date(payload.expires_at)) : null,
+      // Stored the way the column holds it: UTC with no zone suffix, read
+      // from a value that may or may not have carried one.
+      expiresAt: payload.expires_at ? naiveUtc(parseIncomingInstant(payload.expires_at)) : null,
     })
     sendJson(res, 201, { ...apiKeyRead(row), key: plaintext })
     return true
@@ -1115,9 +1162,16 @@ function handleAdmin(req, res, pathname, rawBody, searchParams) {
   }
   // FastAPI redirects a collection path that lost its trailing slash, and it
   // does so while routing, before any dependency runs. 307 keeps the method
-  // and the body, which is what makes a POST survive the replay.
+  // and the body, which is what makes a POST survive the replay. Starlette
+  // builds the target from the request URL with the path replaced, so the
+  // query string travels with it; dropping it here would turn a redirected
+  // owner filter into a request for every key.
   if (pathname === '/admin/api/api-keys') {
-    res.writeHead(307, { Location: '/admin/api/api-keys/', 'Cache-Control': 'no-store' })
+    const query = searchParams.toString()
+    res.writeHead(307, {
+      Location: query === '' ? '/admin/api/api-keys/' : `/admin/api/api-keys/?${query}`,
+      'Cache-Control': 'no-store',
+    })
     res.end()
     return true
   }

@@ -242,9 +242,15 @@ jobs:
         # --resolve 로 Cloudflare를 거치지 않고 루프백의 Nginx에 직접 요청한다.
         # 인증서가 Cloudflare origin cert 라서 공개 CA 체인으로는 검증되지 않으므로
         # -k 가 필요하다.
-        if ssh -i ~/.ssh/id_deploy "ubuntu@${VM1_HOST}" "bash -s --$hosts" <<'REMOTE'
+        # 첫 번째 인자로 이번에 배포한 SHA를 넘겨서, 원격 스크립트가 릴리스
+        # 표식의 내용까지 대조할 수 있게 한다. heredoc 본문은 따옴표로 묶여
+        # 있어서 러너의 변수가 치환되지 않기 때문에, 값은 인자로만 전달된다.
+        if ssh -i ~/.ssh/id_deploy "ubuntu@${VM1_HOST}" "bash -s -- ${DEPLOY_SHA}$hosts" <<'REMOTE'
         set -uo pipefail
         failed=0
+
+        expected_sha="$1"
+        shift
 
         for host in "$@"; do
           resp="$(curl -sk -o /dev/null -D - --max-time 15 -w 'http_code=%{http_code}\n' \
@@ -288,17 +294,32 @@ jobs:
 
           # 관리자 콘솔의 릴리스 표식은 화면 표시 전용이라서, 확인에 실패해도
           # 배포를 되돌리지 않고 경고만 남긴다. 표식이 없으면 콘솔의 "콘솔 빌드"
-          # 항목이 미기록으로 나타날 뿐 다른 기능에는 영향이 없다.
+          # 항목이 미기록으로 나타날 뿐 다른 기능에는 영향이 없다. 다만 응답
+          # 코드만 보면 이전 릴리스의 표식이 그대로 남아 있는 상황을 잡아내지
+          # 못하므로, 본문의 sha 값이 이번에 배포한 SHA와 같은지까지 확인한다.
           if [ "$host" = "admin.bnbong.com" ]; then
-            marker="$(curl -sk -o /dev/null -D - --max-time 15 -w 'http_code=%{http_code}\n' \
+            marker_body="$(mktemp)"
+            marker="$(curl -sk -o "$marker_body" -D - --max-time 15 -w 'http_code=%{http_code}\n' \
               --resolve "${host}:443:127.0.0.1" "https://${host}/release.json" || true)"
             marker_code="$(printf '%s\n' "$marker" | sed -n 's/^http_code=//p' | tail -n 1)"
             if [ "${marker_code:-000}" = "200" ] && \
                printf '%s\n' "$marker" | grep -qiE '^cache-control:.*no-cache'; then
               echo "  origin https://${host}/release.json -> 200, Cache-Control: no-cache 확인"
+              # jq가 없는 호스트에서도 동작하도록 공백을 지운 다음 sha 값을
+              # 뽑아낸다. SHA에는 공백이 포함되지 않으므로 값이 손상되지 않는다.
+              marker_sha="$(tr -d ' \t\n\r' < "$marker_body" \
+                | sed -n 's/.*"sha":"\([0-9a-fA-F]*\)".*/\1/p' | head -n 1)"
+              if [ -z "$marker_sha" ]; then
+                echo "::warning::origin https://${host}/release.json 본문에서 sha 값을 읽지 못했습니다. 콘솔 빌드 정보가 불완전하게 표시됩니다."
+              elif [ "$marker_sha" = "$expected_sha" ]; then
+                echo "  origin https://${host}/release.json -> sha ${marker_sha} 일치 확인"
+              else
+                echo "::warning::origin https://${host}/release.json 의 sha 가 ${marker_sha} 인데 이번에 배포한 SHA 는 ${expected_sha} 입니다. 콘솔이 이전 릴리스의 빌드 정보를 표시합니다."
+              fi
             else
               echo "::warning::origin https://${host}/release.json 확인에 실패했습니다 (${marker_code:-000}). 콘솔 빌드 정보가 미기록으로 표시됩니다."
             fi
+            rm -f "$marker_body"
           fi
         done
 

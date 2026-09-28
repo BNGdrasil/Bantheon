@@ -101,6 +101,76 @@ test('발급한 평문 키를 한 번만 보여 주고 확인을 받은 다음 �
   await expect(newRow.getByText(plaintext.trim().slice(0, 8))).toBeVisible()
 })
 
+test('목록 재조회가 실패해도 평문 모달은 화면에 남는다', async ({ page }) => {
+  await page.goto('/api-keys')
+  await expect(page.locator('table.data-table').getByText('bifrost-gateway')).toBeVisible()
+
+  // The list turns to 502 from here on. The issue itself still reaches the
+  // mock, so the failure lands on the refresh that follows it.
+  await page.route('**/admin/api/api-keys/**', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue()
+      return
+    }
+    await route.fulfill({
+      status: 502,
+      headers: { 'Access-Control-Allow-Origin': '*' },
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'Auth server refused the list request' }),
+    })
+  })
+
+  await page.getByRole('button', { name: '키 발급' }).click()
+  const issueDialog = page.locator('.modal')
+  await issueDialog.getByLabel('키 이름').fill('survives-a-502')
+  await issueDialog.getByLabel('소유자').selectOption({ label: 'operator (ID 2)' })
+  await issueDialog.getByRole('button', { name: '키 발급' }).click()
+
+  await expect(page.getByRole('heading', { name: '키를 발급했습니다' })).toBeVisible()
+  const plaintext = (await page.getByTestId('plaintext-key').innerText()).trim()
+  expect(plaintext).toMatch(PLAINTEXT_PATTERN)
+
+  // The refresh fails and the list area says so, while the panel that holds
+  // the only copy of the key stays exactly where it was.
+  await expect(page.getByText('API 키 목록을 불러오지 못했습니다')).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText('Auth server refused the list request')).toBeVisible()
+  await expect(page.getByTestId('plaintext-key')).toHaveText(plaintext)
+
+  // Closing still works from that state, and only then is the value dropped.
+  await page.getByRole('button', { name: '닫기' }).click()
+  await page.getByRole('button', { name: '닫고 지우기' }).click()
+  await expect(page.getByTestId('plaintext-key')).toBeHidden()
+  await expect(page.getByText('API 키 목록을 불러오지 못했습니다')).toBeVisible()
+})
+
+test('화면을 떠나면 평문이 문서에서 사라진다', async ({ page }) => {
+  await page.goto('/api-keys')
+
+  await page.getByRole('button', { name: '키 발급' }).click()
+  const issueDialog = page.locator('.modal')
+  await issueDialog.getByLabel('키 이름').fill('left-behind')
+  await issueDialog.getByLabel('소유자').selectOption({ label: 'operator (ID 2)' })
+  await issueDialog.getByRole('button', { name: '키 발급' }).click()
+
+  const plaintext = (await page.getByTestId('plaintext-key').innerText()).trim()
+  expect(plaintext).toMatch(PLAINTEXT_PATTERN)
+
+  // The value lives in the state of this page alone, so unmounting the page
+  // drops it even though the panel was never closed. The panel covers the
+  // navigation, so the click is dispatched on the link itself: the router
+  // handles it without a reload, which is the unmount this case is about.
+  await page.getByRole('link', { name: '운영 설정' }).dispatchEvent('click')
+  await expect(page.getByRole('heading', { name: '운영 설정', level: 1 })).toBeVisible()
+  await expect(page.getByTestId('plaintext-key')).toHaveCount(0)
+  expect(await page.content()).not.toContain(plaintext)
+
+  // Coming back does not bring it out of any cache either.
+  await page.goto('/api-keys')
+  await expect(page.getByRole('heading', { name: 'API 키', level: 1 })).toBeVisible()
+  await expect(page.getByTestId('plaintext-key')).toHaveCount(0)
+  expect(await page.content()).not.toContain(plaintext)
+})
+
 test('회전이 구 키를 즉시 폐기하고 새 평문 키를 한 번 보여 준다', async ({ page }) => {
   await page.goto('/api-keys')
 
@@ -145,6 +215,36 @@ test('폐기를 확인하면 목록이 갱신되고 그 키가 폐기 상태로 
   await page.getByLabel('활성 키만 보기').uncheck()
   const row = page.getByRole('row').filter({ hasText: 'bifrost-gateway' })
   await expect(row.locator('.badge')).toHaveText('폐기')
+})
+
+test('회전이 거절되면 확인 대화 상자 안에 그 사유를 적는다', async ({ page }) => {
+  await page.goto('/api-keys')
+
+  await page.route('**/admin/api/api-keys/*/rotate', async (route) => {
+    await route.fulfill({
+      status: 503,
+      headers: { 'Access-Control-Allow-Origin': '*' },
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'Auth server is not reachable' }),
+    })
+  })
+
+  await page.getByRole('button', { name: 'blog-publisher 회전' }).click()
+  const dialog = page.locator('.modal')
+  await dialog.getByRole('button', { name: '회전' }).click()
+
+  // The dialog stays open with the target record, and the refusal is printed
+  // inside it rather than at the top of the page.
+  await expect(dialog.getByText('키를 회전하지 못했습니다')).toBeVisible()
+  await expect(dialog.getByText('Auth server is not reachable')).toBeVisible()
+  await expect(dialog.getByRole('heading', { name: '키를 회전합니다' })).toBeVisible()
+
+  // Cancelling clears the refusal, so the next attempt does not open onto the
+  // previous one.
+  await dialog.getByRole('button', { name: '취소' }).click()
+  await expect(page.getByText('Auth server is not reachable')).toHaveCount(0)
+  await page.getByRole('button', { name: 'blog-publisher 폐기' }).click()
+  await expect(page.locator('.modal').getByText('키를 회전하지 못했습니다')).toHaveCount(0)
 })
 
 test('활성 키 상한을 넘기면 서버가 보낸 409 사유를 그대로 적는다', async ({ page }) => {
