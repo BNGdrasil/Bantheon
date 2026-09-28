@@ -23,6 +23,7 @@
  * cases a test wants to see, and `POST /__reset` puts the server back to its
  * seed state, which every test does before it starts.
  * ------------------------------------------------------------------ */
+import { randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 
 const PORT = Number(process.env.E2E_MOCK_PORT ?? 4599)
@@ -49,6 +50,16 @@ const DEFAULT_MODE = {
   alerts: 'ok',
   /** 'ok' | 'fail' - 'fail' makes every service write answer 207. */
   registryReload: 'ok',
+  /**
+   * Role of the signed-in account, as `/auth/me` reports it.
+   *
+   * 'admin' is what the API key screen has to be seen under: that role may
+   * read the list and is refused every write, which is the case the console
+   * gates its buttons on. The gateway decides this per request, so the two
+   * API key writes below check the same switch rather than trusting the
+   * screen to have disabled the button.
+   */
+  role: 'super_admin',
 }
 
 function seedServices() {
@@ -191,16 +202,114 @@ function seedObservedBuilds() {
   }
 }
 
+/* -- API key seed --------------------------------------------------- */
+
+/**
+ * Highest number of active rows one user may hold. Bidar counts a row that has
+ * expired but was never revoked as active too, because it still occupies a row
+ * an operator can see and rotate, and the mock counts it the same way.
+ *
+ * Two is low on purpose: the seed leaves `e2e-admin` at the ceiling already, so
+ * the 409 the console has to render is one click away instead of five.
+ */
+const MAX_ACTIVE_API_KEYS = 2
+
+/** Key material prefix, matching `API_KEY_PREFIX` in bidar/src/core/apikeys.py. */
+const API_KEY_PREFIX = 'bng_'
+
+/** Leading characters kept in clear, `KEY_PREFIX_LENGTH` in the same module. */
+const KEY_PREFIX_LENGTH = 8
+
+/**
+ * Renders an instant the way the `api_keys` columns store it: UTC with no zone
+ * suffix at all. The console has to read this as UTC rather than as local
+ * time, so writing a `Z` here would take that decision out of the test.
+ */
+function naiveUtc(date) {
+  return date.toISOString().slice(0, 19)
+}
+
+function offsetFromNow(ms) {
+  return naiveUtc(new Date(Date.now() + ms))
+}
+
+/**
+ * A new plaintext key: the prefix plus 43 base64url characters, which is what
+ * `secrets.token_urlsafe(32)` produces on the server.
+ */
+function generatePlaintextKey() {
+  return `${API_KEY_PREFIX}${randomBytes(32).toString('base64url')}`
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Four rows that cover the three states the console draws. `lapsed-probe` is
+ * the one that matters most: it is still `is_active` true and its expiry has
+ * passed, so a screen that read the flag alone would call it active.
+ *
+ * The rows are written in id order here and sorted on the way out, because
+ * the endpoint answers newest first.
+ */
+function seedApiKeys() {
+  return [
+    {
+      id: 1,
+      key_name: 'bifrost-gateway',
+      user_id: 1,
+      is_active: true,
+      key_prefix: 'bng_Bi7f',
+      expires_at: null,
+      created_at: offsetFromNow(-50 * DAY_MS),
+      last_used_at: offsetFromNow(-60 * 60 * 1000),
+    },
+    {
+      id: 2,
+      key_name: 'blog-publisher',
+      user_id: 2,
+      is_active: true,
+      key_prefix: 'bng_Bl2o',
+      expires_at: offsetFromNow(90 * DAY_MS),
+      created_at: offsetFromNow(-20 * DAY_MS),
+      last_used_at: null,
+    },
+    {
+      id: 3,
+      key_name: 'retired-runner',
+      user_id: 2,
+      is_active: false,
+      key_prefix: 'bng_Re4t',
+      expires_at: null,
+      created_at: offsetFromNow(-40 * DAY_MS),
+      last_used_at: offsetFromNow(-12 * DAY_MS),
+    },
+    {
+      id: 4,
+      key_name: 'lapsed-probe',
+      user_id: 1,
+      is_active: true,
+      key_prefix: 'bng_La9x',
+      expires_at: offsetFromNow(-2 * DAY_MS),
+      created_at: offsetFromNow(-30 * DAY_MS),
+      last_used_at: offsetFromNow(-3 * DAY_MS),
+    },
+  ]
+}
+
 let mode = { ...DEFAULT_MODE }
 let services = seedServices()
 let nextServiceId = 4
 let observedBuilds = seedObservedBuilds()
+let apiKeys = seedApiKeys()
+let nextApiKeyId = 5
 
 function reset() {
   mode = { ...DEFAULT_MODE }
   services = seedServices()
   nextServiceId = 4
   observedBuilds = seedObservedBuilds()
+  apiKeys = seedApiKeys()
+  nextApiKeyId = 5
 }
 
 /**
@@ -559,7 +668,9 @@ function handleAuth(req, res, pathname, rawBody) {
       sendDetail(res, 401, 'Could not validate credentials')
       return true
     }
-    sendJson(res, 200, SEED_USERS[0])
+    // The account itself never changes; only the role the server reports for
+    // it does, which is how a spec gets to see the screen under `admin`.
+    sendJson(res, 200, { ...SEED_USERS[0], role: mode.role, is_superuser: mode.role === 'super_admin' })
     return true
   }
 
@@ -781,9 +892,234 @@ function handleServices(req, res, pathname, rawBody) {
   return false
 }
 
-function handleAdmin(req, res, pathname, rawBody) {
+/* -- API keys ------------------------------------------------------- */
+
+/** The read model. Neither the plaintext nor the stored digest appears here. */
+function apiKeyRead(row) {
+  return {
+    id: row.id,
+    key_name: row.key_name,
+    user_id: row.user_id,
+    is_active: row.is_active,
+    key_prefix: row.key_prefix,
+    expires_at: row.expires_at,
+    created_at: row.created_at,
+    last_used_at: row.last_used_at,
+  }
+}
+
+/** Newest first, which is the order the endpoint documents. */
+function sortedApiKeys() {
+  return [...apiKeys].sort((left, right) => {
+    if (left.created_at === right.created_at) {
+      return right.id - left.id
+    }
+    return String(right.created_at).localeCompare(String(left.created_at))
+  })
+}
+
+function countActiveKeys(userId) {
+  return apiKeys.filter((row) => row.user_id === userId && row.is_active).length
+}
+
+/**
+ * The 422 items one issue payload earns, in FastAPI's own shape. The rules
+ * come from `APIKeyCreateRequest` in bidar/src/models/users.py, including the
+ * "Value error, " prefix pydantic puts in front of every `ValueError`.
+ */
+function apiKeyValidationItems(payload) {
+  const items = []
+  const name = payload.key_name
+  if (typeof name !== 'string' || name.trim() === '') {
+    items.push({
+      type: 'value_error',
+      loc: ['body', 'key_name'],
+      msg: 'Value error, key_name must not be blank.',
+      input: name ?? null,
+      ctx: { error: {} },
+    })
+  } else if (name.length > 100) {
+    items.push({
+      type: 'string_too_long',
+      loc: ['body', 'key_name'],
+      msg: 'String should have at most 100 characters',
+      input: name,
+      ctx: { max_length: 100 },
+    })
+  }
+  if (!Number.isInteger(payload.user_id)) {
+    items.push({
+      type: 'int_parsing',
+      loc: ['body', 'user_id'],
+      msg: 'Input should be a valid integer, unable to parse string as an integer',
+      input: payload.user_id ?? null,
+    })
+  }
+  if (payload.expires_at !== undefined && payload.expires_at !== null) {
+    const expiry = new Date(payload.expires_at)
+    if (Number.isNaN(expiry.getTime()) || expiry.getTime() <= Date.now()) {
+      items.push({
+        type: 'value_error',
+        loc: ['body', 'expires_at'],
+        msg: 'Value error, expires_at must be in the future.',
+        input: payload.expires_at,
+        ctx: { error: {} },
+      })
+    }
+  }
+  return items
+}
+
+/**
+ * Creates a row and returns it together with the plaintext.
+ *
+ * The plaintext is generated, handed back once and then forgotten; only the
+ * prefix survives on the row, exactly as the server keeps only a digest.
+ */
+function issueApiKey({ keyName, userId, expiresAt }) {
+  const plaintext = generatePlaintextKey()
+  const row = {
+    id: nextApiKeyId,
+    key_name: keyName,
+    user_id: userId,
+    is_active: true,
+    key_prefix: plaintext.slice(0, KEY_PREFIX_LENGTH),
+    expires_at: expiresAt ?? null,
+    created_at: naiveUtc(new Date()),
+    last_used_at: null,
+  }
+  nextApiKeyId += 1
+  apiKeys.push(row)
+  return { row, plaintext }
+}
+
+/**
+ * Writes are super admin only, and the gateway decides that per request. The
+ * console disables its buttons for a lesser role, and this check is what makes
+ * the test meaningful: it would still answer 403 if the button were clicked.
+ */
+function requireSuperAdmin(res) {
+  if (mode.role === 'super_admin') {
+    return true
+  }
+  sendDetail(res, 403, 'Not enough permissions')
+  return false
+}
+
+function handleApiKeys(req, res, pathname, rawBody, searchParams) {
+  if (pathname === '/admin/api/api-keys/' && req.method === 'GET') {
+    const rawUserId = searchParams.get('user_id')
+    const rows =
+      rawUserId === null
+        ? sortedApiKeys()
+        : sortedApiKeys().filter((row) => row.user_id === Number(rawUserId))
+    // Revoked rows stay in the answer with `is_active` false, so the console
+    // can show what was withdrawn rather than an entry that simply vanished.
+    sendJson(res, 200, rows.map(apiKeyRead))
+    return true
+  }
+
+  if (pathname === '/admin/api/api-keys/' && req.method === 'POST') {
+    if (!requireSuperAdmin(res)) {
+      return true
+    }
+    const payload = parseJsonBody(rawBody)
+    const items = apiKeyValidationItems(payload)
+    if (items.length > 0) {
+      sendValidationError(res, items)
+      return true
+    }
+    const owner = SEED_USERS.find((user) => user.id === payload.user_id)
+    if (!owner) {
+      sendDetail(res, 404, 'User not found')
+      return true
+    }
+    if (!owner.is_active) {
+      sendDetail(res, 400, 'Cannot issue an API key for an inactive user')
+      return true
+    }
+    if (countActiveKeys(owner.id) >= MAX_ACTIVE_API_KEYS) {
+      sendDetail(
+        res,
+        409,
+        `User ${owner.id} already holds ${MAX_ACTIVE_API_KEYS} active API keys, ` +
+          'which is the maximum. Revoke one before issuing another.'
+      )
+      return true
+    }
+    const { row, plaintext } = issueApiKey({
+      keyName: payload.key_name.trim(),
+      userId: owner.id,
+      expiresAt: payload.expires_at ? naiveUtc(new Date(payload.expires_at)) : null,
+    })
+    sendJson(res, 201, { ...apiKeyRead(row), key: plaintext })
+    return true
+  }
+
+  const detailMatch = /^\/admin\/api\/api-keys\/(\d+)$/.exec(pathname)
+  const rotateMatch = /^\/admin\/api\/api-keys\/(\d+)\/rotate$/.exec(pathname)
+  const match = detailMatch ?? rotateMatch
+  if (!match) {
+    return false
+  }
+
+  const keyId = Number(match[1])
+  const index = apiKeys.findIndex((row) => row.id === keyId)
+  if (index === -1) {
+    sendDetail(res, 404, 'API key not found')
+    return true
+  }
+  const row = apiKeys[index]
+
+  if (detailMatch && req.method === 'GET') {
+    sendJson(res, 200, apiKeyRead(row))
+    return true
+  }
+
+  if (detailMatch && req.method === 'DELETE') {
+    if (!requireSuperAdmin(res)) {
+      return true
+    }
+    // Revoking keeps the row and flips the flag, so the answer is 200 with the
+    // revoked record rather than an empty 204. Revoking twice is harmless.
+    row.is_active = false
+    sendJson(res, 200, apiKeyRead(row))
+    return true
+  }
+
+  if (rotateMatch && req.method === 'POST') {
+    if (!requireSuperAdmin(res)) {
+      return true
+    }
+    if (!row.is_active) {
+      sendDetail(res, 409, 'Cannot rotate a revoked API key. Issue a new key instead.')
+      return true
+    }
+    // The old key is refused from this moment; there is no overlap window.
+    row.is_active = false
+    const rotated = issueApiKey({
+      keyName: row.key_name,
+      userId: row.user_id,
+      expiresAt: row.expires_at,
+    })
+    sendJson(res, 200, { ...apiKeyRead(rotated.row), key: rotated.plaintext })
+    return true
+  }
+
+  return false
+}
+
+function handleAdmin(req, res, pathname, rawBody, searchParams) {
   if (!pathname.startsWith('/admin/api')) {
     return false
+  }
+  // FastAPI redirects a collection path that lost its trailing slash, and it
+  // does so while routing, before any dependency runs. 307 keeps the method
+  // and the body, which is what makes a POST survive the replay.
+  if (pathname === '/admin/api/api-keys') {
+    res.writeHead(307, { Location: '/admin/api/api-keys/', 'Cache-Control': 'no-store' })
+    res.end()
+    return true
   }
   if (!requireAccessToken(req, res)) {
     return true
@@ -842,6 +1178,9 @@ function handleAdmin(req, res, pathname, rawBody) {
   if (handleServices(req, res, pathname, rawBody)) {
     return true
   }
+  if (handleApiKeys(req, res, pathname, rawBody, searchParams)) {
+    return true
+  }
 
   sendDetail(res, 404, 'Not Found')
   return true
@@ -856,7 +1195,7 @@ const server = createServer((req, res) => {
     return
   }
 
-  const { pathname } = new URL(req.url ?? '/', `http://${HOST}:${PORT}`)
+  const { pathname, searchParams } = new URL(req.url ?? '/', `http://${HOST}:${PORT}`)
 
   readBody(req)
     .then((rawBody) => {
@@ -869,7 +1208,7 @@ const server = createServer((req, res) => {
       if (handleReady(req, res, pathname)) {
         return
       }
-      if (handleAdmin(req, res, pathname, rawBody)) {
+      if (handleAdmin(req, res, pathname, rawBody, searchParams)) {
         return
       }
       sendDetail(res, 404, 'Not Found')

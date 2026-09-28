@@ -16,6 +16,8 @@ export interface MockMode {
   backups: 'ok' | 'unavailable' | 'not_implemented' | 'bad_gateway'
   alerts: 'ok' | 'alertmanager_down' | 'not_implemented' | 'bad_gateway'
   registryReload: 'ok' | 'fail'
+  /** Role `/auth/me` reports, and the role the API key writes are checked against. */
+  role: 'super_admin' | 'admin'
 }
 
 /**

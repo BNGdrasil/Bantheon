@@ -4,7 +4,9 @@ import {
   ApiError,
   adminApi,
   api,
+  createApiKey,
   createService,
+  fetchApiKeys,
   deleteService,
   fetchAlertObservability,
   fetchBackupObservability,
@@ -13,9 +15,12 @@ import {
   fetchReadiness,
   fetchServiceHealth,
   readinessApi,
+  revokeApiKey,
+  rotateApiKey,
   runHealthCheckAll,
   tokenStorage,
   updateService,
+  type ApiKey,
   type Service,
   type ServiceCreateRequest,
 } from './api'
@@ -79,6 +84,8 @@ interface RecordedRequest {
 interface MockResponse {
   status: number
   body: unknown
+  /** Extra response headers, such as the `Cache-Control` the gateway sends. */
+  headers?: Record<string, string>
 }
 
 /**
@@ -120,7 +127,10 @@ async function withServer(
         // the client hangs until its 30s timeout.
         answer = { status: 500, body: { detail: 'no route for this request' } }
       }
-      response.writeHead(answer.status, { 'Content-Type': 'application/json' })
+      response.writeHead(answer.status, {
+        'Content-Type': 'application/json',
+        ...(answer.headers ?? {}),
+      })
       response.end(JSON.stringify(answer.body))
     })
   })
@@ -901,6 +911,289 @@ describe('fetchAlertObservability', () => {
           available: false,
           error: 'ALERTMANAGER_URL is not configured',
         })
+      }
+    )
+  })
+})
+
+/* -- API keys ------------------------------------------------------- */
+
+/**
+ * `APIKeyRead` in bidar `src/models/users.py`. Every timestamp is written the
+ * way the `TIMESTAMP WITHOUT TIME ZONE` columns store it: a UTC instant with
+ * no zone suffix at all.
+ */
+const API_KEY: ApiKey = {
+  id: 11,
+  key_name: 'bifrost-gateway',
+  user_id: 1,
+  is_active: true,
+  key_prefix: 'bng_Bi7f',
+  expires_at: null,
+  created_at: '2026-09-01T02:00:00',
+  last_used_at: '2026-09-28T01:00:00',
+}
+
+/** 43 base64url characters, which is what `secrets.token_urlsafe(32)` gives. */
+const PLAINTEXT_KEY = 'bng_0hKq3TnRr2VxYd5pZ6sGmB8cLw1eJfA7tUiOn4XbQgM'
+
+const LIMIT_DETAIL =
+  'User 1 already holds 5 active API keys, which is the maximum. Revoke one ' +
+  'before issuing another.'
+
+describe('fetchApiKeys', () => {
+  it('keeps the trailing slash so the gateway answers instead of redirecting', async () => {
+    await withServer(
+      () => ({ status: 200, body: [API_KEY] }),
+      async (recorded) => {
+        const keys = await fetchApiKeys()
+
+        expect(recorded[0].method).toBe('GET')
+        // Without the slash the gateway answers 307 and the call costs a
+        // second round trip on every single list.
+        expect(recorded[0].url).toBe('/api-keys/')
+        expect(keys[0].key_name).toBe('bifrost-gateway')
+        expect(keys[0].key_prefix).toBe('bng_Bi7f')
+      }
+    )
+  })
+
+  it('narrows the list on the server when an owner is given', async () => {
+    await withServer(
+      () => ({ status: 200, body: [API_KEY] }),
+      async (recorded) => {
+        await fetchApiKeys(2)
+
+        expect(recorded[0].url).toBe('/api-keys/?user_id=2')
+      }
+    )
+  })
+
+  it('sends no owner parameter at all when none was chosen', async () => {
+    await withServer(
+      () => ({ status: 200, body: [] }),
+      async (recorded) => {
+        await fetchApiKeys(null)
+
+        expect(recorded[0].url).toBe('/api-keys/')
+      }
+    )
+  })
+
+  it('keeps a revoked key in the list rather than dropping it', async () => {
+    // A withdrawn key is what an operator looks for after an incident, so the
+    // row survives with `is_active` false and the client passes it through.
+    await withServer(
+      () => ({
+        status: 200,
+        body: [API_KEY, { ...API_KEY, id: 9, is_active: false, key_name: 'retired-runner' }],
+      }),
+      async () => {
+        const keys = await fetchApiKeys()
+
+        expect(keys).toHaveLength(2)
+        expect(keys[1].is_active).toBe(false)
+      }
+    )
+  })
+
+  it('reads the answer even though the gateway marks it no-store', async () => {
+    // Every successful admin answer carries `Cache-Control: no-store`. It
+    // stops a shared cache from keeping the list; it is not a signal the
+    // client has to act on, and the body is read exactly as it would be
+    // without the header.
+    await withServer(
+      () => ({
+        status: 200,
+        body: [API_KEY],
+        headers: { 'Cache-Control': 'no-store' },
+      }),
+      async () => {
+        const keys = await fetchApiKeys()
+
+        expect(keys).toHaveLength(1)
+        expect(keys[0].id).toBe(11)
+      }
+    )
+  })
+})
+
+describe('createApiKey', () => {
+  it('reads the plaintext out of the 201 body, which is the only place it exists', async () => {
+    await withServer(
+      () => ({
+        status: 201,
+        body: { ...API_KEY, id: 12, key_prefix: 'bng_0hKq', key: PLAINTEXT_KEY },
+        headers: { 'Cache-Control': 'no-store' },
+      }),
+      async (recorded) => {
+        const created = await createApiKey({ key_name: 'bifrost-gateway', user_id: 1 })
+
+        expect(recorded[0].method).toBe('POST')
+        expect(recorded[0].url).toBe('/api-keys/')
+        expect(created.key).toBe(PLAINTEXT_KEY)
+        expect(created.key).toMatch(/^bng_[A-Za-z0-9_-]{43}$/)
+        // The read half of the body is present too, so the screen can name the
+        // key it just issued without a second request.
+        expect(created.id).toBe(12)
+        expect(created.key_prefix).toBe('bng_0hKq')
+      }
+    )
+  })
+
+  it('omits the expiry from the body when the key should never expire', async () => {
+    await withServer(
+      () => ({ status: 201, body: { ...API_KEY, key: PLAINTEXT_KEY } }),
+      async (recorded) => {
+        await createApiKey({ key_name: 'bifrost-gateway', user_id: 1 })
+
+        // The server reads an absent key as "no expiry". Sending null instead
+        // would be rejected by `extra: forbid` schemas elsewhere and says
+        // something different from saying nothing.
+        expect(JSON.parse(recorded[0].body)).toEqual({
+          key_name: 'bifrost-gateway',
+          user_id: 1,
+        })
+      }
+    )
+  })
+
+  it('sends the expiry as a UTC instant when one was chosen', async () => {
+    await withServer(
+      () => ({ status: 201, body: { ...API_KEY, key: PLAINTEXT_KEY } }),
+      async (recorded) => {
+        await createApiKey({
+          key_name: 'blog-publisher',
+          user_id: 2,
+          expires_at: '2026-12-31T15:00:00.000Z',
+        })
+
+        expect(JSON.parse(recorded[0].body).expires_at).toBe('2026-12-31T15:00:00.000Z')
+      }
+    )
+  })
+
+  it('rejects the active-key ceiling as a 409 that carries the server reason', async () => {
+    await withServer(
+      () => ({ status: 409, body: { detail: LIMIT_DETAIL } }),
+      async () => {
+        const error = await createApiKey({ key_name: 'one-too-many', user_id: 1 }).then(
+          () => null,
+          (reason: unknown) => reason
+        )
+
+        expect(error).toBeInstanceOf(ApiError)
+        const apiError = error as ApiError
+        expect(apiError.status).toBe(409)
+        expect(apiError.isConflict).toBe(true)
+        expect(apiError.detail).toBe(LIMIT_DETAIL)
+      }
+    )
+  })
+
+  it('turns the FastAPI 422 list into one field-named message', async () => {
+    await withServer(
+      () => ({
+        status: 422,
+        body: {
+          detail: [
+            {
+              type: 'value_error',
+              loc: ['body', 'key_name'],
+              msg: 'Value error, key_name must not be blank.',
+              input: '   ',
+            },
+            {
+              type: 'value_error',
+              loc: ['body', 'expires_at'],
+              msg: 'Value error, expires_at must be in the future.',
+              input: '2020-01-01T00:00:00Z',
+            },
+          ],
+        },
+      }),
+      async () => {
+        const error = await createApiKey({ key_name: '   ', user_id: 1 }).then(
+          () => null,
+          (reason: unknown) => reason
+        )
+
+        expect((error as ApiError).status).toBe(422)
+        expect((error as ApiError).detail).toBe(
+          'key_name: key_name must not be blank.; expires_at: expires_at must be in the future.'
+        )
+      }
+    )
+  })
+})
+
+describe('revokeApiKey', () => {
+  it('parses the 200 body into the revoked record instead of expecting a 204', async () => {
+    // The row is kept and the flag is flipped, so the answer states the stored
+    // state. A 204 would leave the screen guessing what the server wrote.
+    await withServer(
+      () => ({
+        status: 200,
+        body: { ...API_KEY, is_active: false },
+        headers: { 'Cache-Control': 'no-store' },
+      }),
+      async (recorded) => {
+        const revoked = await revokeApiKey(11)
+
+        expect(recorded[0].method).toBe('DELETE')
+        expect(recorded[0].url).toBe('/api-keys/11')
+        expect(revoked.is_active).toBe(false)
+        expect(revoked.key_name).toBe('bifrost-gateway')
+        // The revoked record carries no key material, not even a digest.
+        expect(revoked).not.toHaveProperty('key')
+        expect(revoked).not.toHaveProperty('key_hash')
+      }
+    )
+  })
+})
+
+describe('rotateApiKey', () => {
+  it('reads the new id, prefix and plaintext out of the 200 body', async () => {
+    await withServer(
+      () => ({
+        status: 200,
+        body: {
+          ...API_KEY,
+          id: 13,
+          key_prefix: 'bng_0hKq',
+          created_at: '2026-09-28T02:00:00',
+          last_used_at: null,
+          key: PLAINTEXT_KEY,
+        },
+      }),
+      async (recorded) => {
+        const rotated = await rotateApiKey(11)
+
+        expect(recorded[0].method).toBe('POST')
+        expect(recorded[0].url).toBe('/api-keys/11/rotate')
+        // A new row, with the name and the owner carried over from the old one.
+        expect(rotated.id).toBe(13)
+        expect(rotated.key_prefix).toBe('bng_0hKq')
+        expect(rotated.key_name).toBe('bifrost-gateway')
+        expect(rotated.user_id).toBe(1)
+        expect(rotated.key).toBe(PLAINTEXT_KEY)
+        expect(rotated.last_used_at).toBeNull()
+      }
+    )
+  })
+
+  it('rejects a rotation of an already revoked key as 409', async () => {
+    const detail = 'Cannot rotate a revoked API key. Issue a new key instead.'
+    await withServer(
+      () => ({ status: 409, body: { detail } }),
+      async () => {
+        const error = await rotateApiKey(9).then(
+          () => null,
+          (reason: unknown) => reason
+        )
+
+        expect((error as ApiError).status).toBe(409)
+        expect((error as ApiError).detail).toBe(detail)
       }
     )
   })
