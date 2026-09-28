@@ -30,6 +30,30 @@ test('개요 화면이 준비 상태 카드와 발화 중 알림을 함께 보�
   )
 })
 
+test('개요 화면이 게이트웨이 릴리스 정보를 빌드 필드별로 보여준다', async ({ page }) => {
+  await page.goto('/dashboard')
+
+  const release = page.locator('section').filter({ hasText: '게이트웨이 릴리스' })
+  await expect(release.getByRole('heading', { name: '게이트웨이 릴리스' })).toBeVisible()
+
+  // The SHA is cut to twelve characters on screen and kept whole in the title,
+  // so a full value can still be read and copied.
+  const sha = release.getByText('abcdef012345', { exact: true })
+  await expect(sha).toBeVisible()
+  await expect(sha).toHaveAttribute('title', 'abcdef0123456789abcdef0123456789abcdef01')
+
+  await expect(release.getByText('0.2.0', { exact: true })).toBeVisible()
+  await expect(release.getByText('main', { exact: true })).toBeVisible()
+  // Timestamps are rendered in KST with the zone spelled out.
+  await expect(release.getByText('2026. 09. 28. 08:10:00 KST', { exact: true })).toBeVisible()
+  await expect(release.getByText('2026. 09. 28. 09:15:00 KST', { exact: true })).toBeVisible()
+  await expect(release.getByText('기동 이후 경과', { exact: true })).toBeVisible()
+
+  // Every field is recorded here, so the missing-build-argument notice stays
+  // away and no field falls back to the not-recorded label.
+  await expect(release.getByText('미기록')).toHaveCount(0)
+})
+
 test('/ready가 503이면 준비되지 않은 상태와 그 이유를 적는다', async ({ page, request }) => {
   await setMode(request, { ready: 'not_ready' })
 

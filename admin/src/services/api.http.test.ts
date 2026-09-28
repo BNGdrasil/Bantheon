@@ -9,8 +9,11 @@ import {
   fetchAlertObservability,
   fetchBackupObservability,
   fetchCurrentUser,
+  fetchOverviewStats,
   fetchReadiness,
+  fetchServiceHealth,
   readinessApi,
+  runHealthCheckAll,
   tokenStorage,
   updateService,
   type Service,
@@ -354,6 +357,285 @@ describe('updateService', () => {
         // as is". Sending the untouched fields back would overwrite whatever
         // changed on the server since this form was opened.
         expect(JSON.parse(recorded[0].body)).toEqual({ display_name: 'Grafana (renamed)' })
+      }
+    )
+  })
+})
+
+/* -- Build provenance ----------------------------------------------- */
+
+describe('fetchServiceHealth', () => {
+  it('reads the build an upstream reported alongside the stored record', async () => {
+    // Body shape from bifrost `docs/admin-api.md`. The build fields do not
+    // come from the database: they belong to the process that ran the probe.
+    await withServer(
+      () => ({
+        status: 200,
+        body: {
+          service_id: 1,
+          service_name: 'bidar',
+          health_status: 'healthy',
+          last_health_check: '2026-09-28T06:46:52.847361Z',
+          is_active: true,
+          upstream_build: {
+            version: '0.2.0',
+            build_sha: 'deadbeefcafe0123456789abcdef0123456789ab',
+            build_time: '2026-09-28T04:05:06Z',
+            build_ref: 'local-e2e',
+            started_at: '2026-09-28T06:43:35Z',
+          },
+          build_observed_at: '2026-09-28T06:46:52.830449Z',
+        },
+      }),
+      async (recorded) => {
+        const result = await fetchServiceHealth(1)
+
+        expect(recorded[0].url).toBe('/services/1/health')
+        expect(result.upstream_build?.build_sha).toBe(
+          'deadbeefcafe0123456789abcdef0123456789ab'
+        )
+        expect(result.upstream_build?.build_ref).toBe('local-e2e')
+        expect(result.build_observed_at).toBe('2026-09-28T06:46:52.830449Z')
+      }
+    )
+  })
+
+  it('keeps an unobserved build null instead of inventing an empty one', async () => {
+    // Both fields are null until a probe observes them, and they become null
+    // again after a registry reload. Null here means "nothing was observed",
+    // which is not the same as an upstream that answered without a build.
+    await withServer(
+      () => ({
+        status: 200,
+        body: {
+          service_id: 3,
+          service_name: 'sandbox',
+          health_status: 'unknown',
+          last_health_check: null,
+          is_active: false,
+          upstream_build: null,
+          build_observed_at: null,
+        },
+      }),
+      async () => {
+        const result = await fetchServiceHealth(3)
+
+        expect(result.upstream_build).toBeNull()
+        expect(result.build_observed_at).toBeNull()
+        expect(result.health_status).toBe('unknown')
+      }
+    )
+  })
+
+  it('accepts a per-field null inside the build object', async () => {
+    // An upstream may publish only some of the five keys, and the gateway
+    // drops a value it refused to accept rather than coercing it into text.
+    await withServer(
+      () => ({
+        status: 200,
+        body: {
+          service_id: 2,
+          service_name: 'blog',
+          health_status: 'healthy',
+          last_health_check: '2026-09-28T01:00:00Z',
+          is_active: true,
+          upstream_build: {
+            version: '1.4.0',
+            build_sha: null,
+            build_time: null,
+            build_ref: null,
+            started_at: '2026-09-27T22:00:00Z',
+          },
+          build_observed_at: '2026-09-28T01:00:00Z',
+        },
+      }),
+      async () => {
+        const result = await fetchServiceHealth(2)
+
+        expect(result.upstream_build?.version).toBe('1.4.0')
+        expect(result.upstream_build?.build_sha).toBeNull()
+        expect(result.upstream_build?.build_ref).toBeNull()
+      }
+    )
+  })
+
+  it('parses an answer from a gateway that carries neither field', async () => {
+    // A gateway that predates the block omits both keys. The stored record is
+    // still readable, so the call must not fail over their absence.
+    await withServer(
+      () => ({
+        status: 200,
+        body: {
+          service_id: 1,
+          service_name: 'bidar',
+          health_status: 'healthy',
+          last_health_check: '2026-09-28T06:46:52.847361Z',
+          is_active: true,
+        },
+      }),
+      async () => {
+        const result = await fetchServiceHealth(1)
+
+        expect(result.health_status).toBe('healthy')
+        expect(result.upstream_build).toBeUndefined()
+        expect(result.build_observed_at).toBeUndefined()
+      }
+    )
+  })
+})
+
+describe('runHealthCheckAll', () => {
+  it('reads the build provenance out of details while results stays a string map', async () => {
+    await withServer(
+      () => ({
+        status: 200,
+        body: {
+          message: 'Health check completed',
+          service_count: 2,
+          results: { bidar: 'healthy', blog: 'error' },
+          details: {
+            bidar: {
+              status: 'healthy',
+              upstream_build: {
+                version: '0.2.0',
+                build_sha: 'deadbeefcafe0123456789abcdef0123456789ab',
+                build_time: '2026-09-28T04:05:06Z',
+                build_ref: 'local-e2e',
+                started_at: '2026-09-28T06:43:35Z',
+              },
+              build_observed_at: '2026-09-28T06:46:52.830449Z',
+            },
+            blog: { status: 'error', upstream_build: null, build_observed_at: null },
+          },
+        },
+      }),
+      async (recorded) => {
+        const result = await runHealthCheckAll()
+
+        expect(recorded[0].method).toBe('POST')
+        expect(recorded[0].url).toBe('/services/health-check-all')
+        // The status stayed a plain string, which is what the screens read to
+        // draw their badges. Turning it into an object would break them.
+        expect(result.results.bidar).toBe('healthy')
+        expect(result.results.blog).toBe('error')
+        expect(result.details?.bidar.status).toBe('healthy')
+        expect(result.details?.bidar.upstream_build?.build_sha).toBe(
+          'deadbeefcafe0123456789abcdef0123456789ab'
+        )
+        expect(result.details?.blog.upstream_build).toBeNull()
+        expect(result.details?.blog.build_observed_at).toBeNull()
+      }
+    )
+  })
+
+  it('parses a run from a gateway that sends no details map at all', async () => {
+    await withServer(
+      () => ({
+        status: 200,
+        body: {
+          message: 'Health check completed',
+          service_count: 1,
+          results: { bidar: 'healthy' },
+        },
+      }),
+      async () => {
+        const result = await runHealthCheckAll()
+
+        expect(result.service_count).toBe(1)
+        expect(result.results.bidar).toBe('healthy')
+        // The screens reach into this map with optional chaining, so its
+        // absence has to stay `undefined` rather than become an empty object.
+        expect(result.details).toBeUndefined()
+      }
+    )
+  })
+})
+
+describe('fetchOverviewStats', () => {
+  it('reads the gateway build block out of the app section', async () => {
+    await withServer(
+      () => ({
+        status: 200,
+        body: {
+          services: { total: 3, active: 2, healthy: 1, unhealthy: 1, unknown: 1 },
+          registry: { ready: true, loaded_services: 3, last_error: null },
+          app: {
+            version: '0.2.0',
+            build_sha: 'abcdef0123456789abcdef0123456789abcdef01',
+            build_time: '2026-09-27T23:10:00Z',
+            build_ref: 'main',
+            started_at: '2026-09-28T00:15:00Z',
+            environment: 'production',
+          },
+          users: null,
+          api_requests: null,
+          system: null,
+        },
+      }),
+      async (recorded) => {
+        const result = await fetchOverviewStats()
+
+        expect(recorded[0].url).toBe('/settings/stats/overview')
+        expect(result.app.build_sha).toBe('abcdef0123456789abcdef0123456789abcdef01')
+        expect(result.app.started_at).toBe('2026-09-28T00:15:00Z')
+        expect(result.app.environment).toBe('production')
+      }
+    )
+  })
+
+  it('keeps a build argument the image never received as null', async () => {
+    // An image built without the arguments reports null for the three
+    // injected fields. The version and the start time are still real values,
+    // so the answer is not discarded.
+    await withServer(
+      () => ({
+        status: 200,
+        body: {
+          services: { total: 0, active: 0, healthy: 0, unhealthy: 0, unknown: 0 },
+          registry: { ready: true, loaded_services: 0, last_error: null },
+          app: {
+            version: '0.2.0',
+            build_sha: null,
+            build_time: null,
+            build_ref: null,
+            started_at: '2026-09-28T00:15:00Z',
+            environment: 'development',
+          },
+          users: null,
+          api_requests: null,
+          system: null,
+        },
+      }),
+      async () => {
+        const result = await fetchOverviewStats()
+
+        expect(result.app.build_sha).toBeNull()
+        expect(result.app.build_time).toBeNull()
+        expect(result.app.build_ref).toBeNull()
+        expect(result.app.version).toBe('0.2.0')
+      }
+    )
+  })
+
+  it('parses an app block from a gateway that predates the build fields', async () => {
+    await withServer(
+      () => ({
+        status: 200,
+        body: {
+          services: { total: 0, active: 0, healthy: 0, unhealthy: 0, unknown: 0 },
+          registry: { ready: false, loaded_services: 0, last_error: 'not loaded' },
+          app: { version: '0.1.0', environment: 'production' },
+          users: null,
+          api_requests: null,
+          system: null,
+        },
+      }),
+      async () => {
+        const result = await fetchOverviewStats()
+
+        expect(result.app.version).toBe('0.1.0')
+        expect(result.app.build_sha).toBeUndefined()
+        expect(result.app.started_at).toBeUndefined()
       }
     )
   })

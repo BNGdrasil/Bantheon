@@ -17,6 +17,8 @@ import {
 import { POLL_INTERVAL_MS, formatKst, useNow } from '../lib/datetime'
 import { HealthBadge } from '../components/HealthBadge'
 import FiringAlerts from '../components/FiringAlerts'
+import { BuildFactsList } from '../components/BuildFacts'
+import { buildValue } from '../lib/build'
 
 /** Badge tone for one component of the readiness probe. */
 function readinessTone(value: string): string {
@@ -217,6 +219,14 @@ function DashboardPage() {
   }
 
   const registry = stats.registry
+  const app = stats.app
+  // The three fields the image build injects. A missing one is not a fault of
+  // the gateway, so the screen explains where the value would have come from
+  // instead of leaving the operator with three bare "미기록" rows.
+  const missingBuildArgs =
+    buildValue(app.build_sha) === null ||
+    buildValue(app.build_time) === null ||
+    buildValue(app.build_ref) === null
 
   return (
     <div>
@@ -274,9 +284,45 @@ function DashboardPage() {
           <div className="badge-row">
             <span className="badge badge--neutral">{stats.app.environment}</span>
           </div>
-          <p className="metric-note">실행 중인 Bifrost 게이트웨이의 버전과 환경입니다.</p>
+          <p className="metric-note">
+            실행 중인 Bifrost 게이트웨이의 버전과 환경입니다. 어떤 커밋을 실행하고 있는지는 아래의
+            릴리스 구역에서 확인할 수 있습니다.
+          </p>
         </article>
       </div>
+
+      <section className="section">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">Release</p>
+            <h2 className="section-title">게이트웨이 릴리스</h2>
+          </div>
+          <FreshnessLine
+            dataUpdatedAt={overviewQuery.dataUpdatedAt}
+            now={now}
+            isFetching={overviewQuery.isFetching}
+            label="개요 갱신"
+          />
+        </div>
+
+        <p className="detail spaced-bottom">
+          지금 실행 중인 게이트웨이 프로세스가 보고한 빌드 정보입니다. 이 값은 이미지를 만들 때
+          주입한 것이고 프로세스가 다시 시작하면 기동 시각만 바뀌므로, 배포가 실제로 반영되었는지
+          커밋 SHA로 확인할 수 있습니다.
+        </p>
+
+        <div className="card">
+          <BuildFactsList build={app} now={now} />
+        </div>
+
+        {missingBuildArgs && (
+          <p className="detail spaced-top-sm">
+            미기록으로 적은 항목은 게이트웨이가 그 값을 아예 보고하지 않았다는 뜻입니다. 이미지를
+            빌드할 때 커밋 SHA와 빌드 시각, 빌드 기준을 인자로 넣지 않으면 실행 중인 프로세스도 그
+            값을 알지 못합니다.
+          </p>
+        )}
+      </section>
 
       {readinessSection}
 

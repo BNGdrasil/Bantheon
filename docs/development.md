@@ -48,6 +48,17 @@ cd admin   # 또는 client
 npm run build
 ```
 
+배포 워크플로는 admin을 빌드한 다음 `admin/dist/release.json`을 함께 만듭니다. 이 파일에는 빌드한 커밋 SHA와 빌드 기준(`ref`), UTC 기준 빌드 시각이 들어가며, 관리자 콘솔의 운영 설정 화면이 이 값을 읽어서 "콘솔 빌드" 항목에 표시합니다. 로컬에서 `npm run build`를 실행할 때에는 이 파일을 만들지 않으므로, 개발 서버와 스모크 시험에서는 콘솔 빌드가 "미기록"으로 나타납니다.
+
+## 린트
+
+두 앱 모두 자신의 디렉터리에 ESLint 설정을 두고 있습니다. `admin/.eslintrc.cjs`와 `client/.eslintrc.cjs`가 각각의 규칙을 정의하며, 경고를 하나라도 남기면 실패하도록 `--max-warnings 0`을 사용합니다.
+
+```bash
+cd admin   # 또는 client
+npm run lint
+```
+
 ## 관리자 콘솔 스모크 시험
 
 `admin/`에는 vitest로 실행하는 단위 시험과 별개로, Playwright로 실행하는 스모크 시험이 `admin/e2e/` 아래에 있습니다. 이 시험은 개발 서버가 아니라 빌드 결과물을 Chromium으로 띄우고, 게이트웨이를 모사하는 `admin/e2e/mock-gateway.mjs`를 상대로 화면을 확인합니다. 따라서 Bifrost와 Bidar를 실행하지 않아도 되며, 처음 실행할 때 브라우저를 한 번 내려받아야 합니다.
@@ -80,8 +91,7 @@ CI에서는 `.github/workflows/build.yml`의 admin 작업이 빌드 결과를 �
 
 ## 알려진 제한과 후속 과제
 
-- 서비스 화면에는 등록 기능만 있고, 등록한 서비스를 수정하거나 삭제하는 UI는 아직 없습니다.
 - 비밀번호 재설정 기능이 없습니다. Bidar 인증 서버가 이 기능을 제공하지 않기 때문에, 관리자 콘솔도 억지로 만들지 않았습니다.
 - 운영 개요 화면의 인프라 이력(`DashboardPage.tsx`의 `INFRA_HISTORY`)은 검토를 거친 정적 텍스트입니다. 실시간으로 OCI를 조회한 결과가 아니므로, 실제 인프라 구성이 바뀌면 이 배열도 함께 고쳐야 합니다.
-- `admin/package.json`에는 `lint` 스크립트가 있지만 `admin/` 안에 ESLint 설정 파일이 없습니다. `client/`에는 `.eslintrc.cjs`가 있으므로, 같은 설정을 admin에도 추가하는 편이 좋습니다.
+- 관리자 콘솔은 VM1에 보관된 직전 릴리스, 다시 말해 롤백 지점을 표시하지 못합니다. 이 정보는 VM1 파일 시스템의 `previous-<app>` 심볼릭 링크에만 있고 콘솔이 조회할 수 있는 API가 없기 때문입니다. 롤백 지점을 확인하려면 VM1에서 `ls -l /opt/bnbong/previous-admin`을 직접 실행해야 합니다.
 - 저장소 전역에 `core.autocrlf`가 `true`로 설정된 환경에서 작업하면 커밋 시점에 줄바꿈 문자가 변환되어 diff에 혼동을 줄 수 있습니다. `.gitattributes`로 줄바꿈 정책을 명시하는 편이 안전합니다.

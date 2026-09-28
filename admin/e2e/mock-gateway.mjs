@@ -104,6 +104,42 @@ function seedServices() {
   ]
 }
 
+/**
+ * What each upstream puts in its own `/health` body, as far as the gateway
+ * keeps it. `blog` deliberately reports nothing: an upstream that publishes no
+ * build fields is the case the console has to state honestly instead of
+ * drawing five blank rows.
+ */
+const UPSTREAM_BUILDS = {
+  'auth-server': {
+    version: '0.2.0',
+    build_sha: 'deadbeefcafe0123456789abcdef0123456789ab',
+    build_time: '2026-09-28T04:05:06Z',
+    build_ref: 'main',
+    started_at: '2026-09-28T06:43:35Z',
+  },
+  blog: null,
+  sandbox: {
+    version: '0.1.0',
+    build_sha: '0123456789abcdef0123456789abcdef01234567',
+    build_time: '2026-09-27T10:00:00Z',
+    build_ref: 'v0.1.0',
+    started_at: '2026-09-27T10:05:00Z',
+  },
+}
+
+/**
+ * The gateway's own build block, shared by the overview statistics exactly as
+ * bifrost/src/core/buildinfo.py shares it with the root endpoint.
+ */
+const GATEWAY_BUILD = {
+  version: '0.2.0',
+  build_sha: 'abcdef0123456789abcdef0123456789abcdef01',
+  build_time: '2026-09-27T23:10:00Z',
+  build_ref: 'main',
+  started_at: '2026-09-28T00:15:00Z',
+}
+
 const SEED_USERS = [
   {
     id: 1,
@@ -137,14 +173,48 @@ const SEED_USERS = [
   },
 ]
 
+/**
+ * Build provenance the gateway observed per service, keyed by service name.
+ *
+ * The real gateway holds this in the process that ran the probe rather than
+ * in the database, so a service that has not been probed since the last
+ * reload has no entry at all. The seed carries one entry, which matches the
+ * seed list: auth-server has a `last_health_check`, so a probe did run and
+ * did read that upstream's build.
+ */
+function seedObservedBuilds() {
+  return {
+    'auth-server': {
+      upstream_build: UPSTREAM_BUILDS['auth-server'],
+      build_observed_at: '2026-09-28T01:00:00Z',
+    },
+  }
+}
+
 let mode = { ...DEFAULT_MODE }
 let services = seedServices()
 let nextServiceId = 4
+let observedBuilds = seedObservedBuilds()
 
 function reset() {
   mode = { ...DEFAULT_MODE }
   services = seedServices()
   nextServiceId = 4
+  observedBuilds = seedObservedBuilds()
+}
+
+/**
+ * The two build fields of one service. Both are null when no probe has
+ * observed anything, and `build_observed_at` stays null when the probe ran
+ * but the upstream published no build fields, because the gateway only
+ * records the observation time together with a build it actually read.
+ */
+function observedBuild(serviceName) {
+  const observed = observedBuilds[serviceName]
+  if (!observed) {
+    return { upstream_build: null, build_observed_at: null }
+  }
+  return observed
 }
 
 /* -- Response helpers ---------------------------------------------- */
@@ -583,13 +653,30 @@ function handleServices(req, res, pathname, rawBody) {
 
   if (pathname === '/admin/api/services/health-check-all' && req.method === 'POST') {
     const results = {}
+    const details = {}
+    const observedAt = nowIso()
     for (const service of services) {
       results[service.name] = service.health_status === 'unhealthy' ? 'unhealthy' : 'healthy'
+      // The probe reads the upstream's health body, so what it observes is
+      // recorded here exactly as the gateway records it: a build only when the
+      // upstream published one, and the observation time only alongside it.
+      const build = UPSTREAM_BUILDS[service.name] ?? null
+      observedBuilds[service.name] = {
+        upstream_build: build,
+        build_observed_at: build ? observedAt : null,
+      }
+      details[service.name] = {
+        status: results[service.name],
+        ...observedBuilds[service.name],
+      }
     }
+    // `results` keeps the plain status strings it always carried, and the
+    // build provenance travels in the separate `details` map.
     sendJson(res, 200, {
       message: 'health check completed',
       service_count: services.length,
       results,
+      details,
     })
     return true
   }
@@ -647,6 +734,9 @@ function handleServices(req, res, pathname, rawBody) {
       health_status: service.health_status,
       last_health_check: service.last_health_check,
       is_active: service.is_active,
+      // Read from the process state, not from the stored record, which is why
+      // this endpoint can report a build while `last_health_check` is old.
+      ...observedBuild(service.name),
     })
     return true
   }
@@ -710,7 +800,10 @@ function handleAdmin(req, res, pathname, rawBody) {
         unknown: stats.unknown_services,
       },
       registry: { ready: true, loaded_services: services.length, last_error: null },
-      app: { version: '0.2.0', environment: 'test' },
+      // The same block the root endpoint and the liveness probe report. A
+      // field the image build did not inject would be null here, never an
+      // empty string.
+      app: { ...GATEWAY_BUILD, environment: 'test' },
       // The gateway does not collect these at all, and null is not zero.
       users: null,
       api_requests: null,

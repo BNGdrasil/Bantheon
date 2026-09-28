@@ -337,6 +337,10 @@ function ServicesPage() {
               실행 {formatKst(probeRanAt)} · 대상 {probeResult.service_count}건
             </p>
           </div>
+          <p className="detail spaced-bottom">
+            이 표에는 서비스별 검사 결과만 담았습니다. 검사가 함께 읽어 온 업스트림 빌드 정보는
+            서비스 목록 API가 제공하지 않으므로, 각 서비스의 상세 화면에서 확인하시기 바랍니다.
+          </p>
           {probeResult.service_count === 0 ? (
             <div className="state-block">
               <p className="state-block-title">검사한 서비스가 없습니다</p>

@@ -122,6 +122,24 @@ jobs:
       working-directory: ./${{ matrix.app }}
       run: npm run build
 
+    # 관리자 콘솔이 자기 자신의 빌드를 화면에 적을 수 있도록 릴리스 표식을
+    # 번들 안에 함께 넣는다. 커밋 SHA는 체크아웃한 작업 트리에서 직접 읽으므로,
+    # 과거 SHA를 지정해서 다시 빌드하는 롤백 배포에서도 실제로 빌드한 커밋이
+    # 기록된다. dist/ 안에 두면 이후 업로드와 배포 경로를 그대로 따라간다.
+    - name: Write release marker (admin)
+      if: matrix.app == 'admin'
+      working-directory: ./admin
+      env:
+        BUILD_REF: ${{ github.ref_name }}
+      run: |
+        set -euo pipefail
+        sha="$(git rev-parse HEAD)"
+        built_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        jq -n --arg sha "$sha" --arg ref "$BUILD_REF" --arg built_at "$built_at" \
+          '{sha: $sha, ref: $ref, built_at: $built_at}' > dist/release.json
+        echo "admin/dist/release.json 을 만들었습니다."
+        cat dist/release.json
+
     - name: Upload build artifacts (${{ matrix.app }})
       uses: actions/upload-artifact@v6
       with:
@@ -265,6 +283,21 @@ jobs:
             else
               echo "::error::origin https://${host}${asset} -> ${asset_code} (기대한 코드: 200)"
               failed=1
+            fi
+          fi
+
+          # 관리자 콘솔의 릴리스 표식은 화면 표시 전용이라서, 확인에 실패해도
+          # 배포를 되돌리지 않고 경고만 남긴다. 표식이 없으면 콘솔의 "콘솔 빌드"
+          # 항목이 미기록으로 나타날 뿐 다른 기능에는 영향이 없다.
+          if [ "$host" = "admin.bnbong.com" ]; then
+            marker="$(curl -sk -o /dev/null -D - --max-time 15 -w 'http_code=%{http_code}\n' \
+              --resolve "${host}:443:127.0.0.1" "https://${host}/release.json" || true)"
+            marker_code="$(printf '%s\n' "$marker" | sed -n 's/^http_code=//p' | tail -n 1)"
+            if [ "${marker_code:-000}" = "200" ] && \
+               printf '%s\n' "$marker" | grep -qiE '^cache-control:.*no-cache'; then
+              echo "  origin https://${host}/release.json -> 200, Cache-Control: no-cache 확인"
+            else
+              echo "::warning::origin https://${host}/release.json 확인에 실패했습니다 (${marker_code:-000}). 콘솔 빌드 정보가 미기록으로 표시됩니다."
             fi
           fi
         done

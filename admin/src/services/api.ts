@@ -557,9 +557,32 @@ export interface AlertsObservability {
 }
 
 /**
+ * Build provenance an upstream reported in its health response.
+ *
+ * The field names match the block the gateway produces for itself, so one
+ * component renders both. Every field is optional: an upstream may publish
+ * only some of them, and a value the gateway refused to accept, because it
+ * was not a string or was too long, is absent rather than coerced into text.
+ */
+export interface UpstreamBuildInfo {
+  version?: string | null
+  build_sha?: string | null
+  build_time?: string | null
+  build_ref?: string | null
+  started_at?: string | null
+}
+
+/**
  * Stored health of one service. The endpoint that serves this reads the last
  * persisted record; it does not probe the upstream, so every rendering of it
  * has to be labelled as a past observation.
+ *
+ * `upstream_build` and `build_observed_at` are the one part of this answer
+ * that does not come from the database. The gateway holds them in the process
+ * that ran the probe, so both are null until a probe observes them and both
+ * are lost again when the registry is reloaded or the gateway restarts. Both
+ * keys are also absent altogether from a gateway that predates the field,
+ * which is why they are optional here as well as nullable.
  */
 export interface ServiceHealthStatusResponse {
   service_id: number
@@ -567,6 +590,8 @@ export interface ServiceHealthStatusResponse {
   health_status: HealthStatus
   last_health_check: string | null
   is_active: boolean
+  upstream_build?: UpstreamBuildInfo | null
+  build_observed_at?: string | null
 }
 
 export interface ActionResponse {
@@ -579,11 +604,28 @@ export interface ReloadResult {
   service_count: number
 }
 
-/** Result of one probe run. Keys are service names. */
+export type ProbeOutcome = 'healthy' | 'unhealthy' | 'error'
+
+/** Per-service outcome of one probe run, with what that probe observed. */
+export interface HealthCheckDetail {
+  status: ProbeOutcome
+  upstream_build?: UpstreamBuildInfo | null
+  build_observed_at?: string | null
+}
+
+/**
+ * Result of one probe run. Keys are service names.
+ *
+ * `results` keeps the plain status string it has always carried, and the
+ * build provenance arrives in the separate `details` map rather than by
+ * turning that string into an object. A gateway that predates the field sends
+ * no `details` at all, so every read of it has to tolerate its absence.
+ */
 export interface HealthCheckAllResult {
   message: string
   service_count: number
-  results: Record<string, 'healthy' | 'unhealthy' | 'error'>
+  results: Record<string, ProbeOutcome>
+  details?: Record<string, HealthCheckDetail>
 }
 
 /**
@@ -603,8 +645,19 @@ export interface OverviewStats {
     loaded_services: number
     last_error: string | null
   }
+  /**
+   * The build provenance block the gateway also reports on its root endpoint
+   * and its liveness probe, plus the environment name. Only `version` and
+   * `environment` are always present: the other four are null when the image
+   * was built without the matching build argument, and they are absent
+   * entirely on a gateway that predates the block.
+   */
   app: {
     version: string
+    build_sha?: string | null
+    build_time?: string | null
+    build_ref?: string | null
+    started_at?: string | null
     environment: string
   }
   users: null

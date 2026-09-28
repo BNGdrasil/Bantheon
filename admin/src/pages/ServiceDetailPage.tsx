@@ -26,6 +26,8 @@ import { HealthBadge, ProbeBadge } from '../components/HealthBadge'
 import { POLL_INTERVAL_MS, formatKst, useNow } from '../lib/datetime'
 import { Dialog } from '../components/Dialog'
 import { RegistryOutcomeNotice, describeRegistryOutcome } from '../lib/registry'
+import { BuildFactsList } from '../components/BuildFacts'
+import { hasAnyBuildFact } from '../lib/build'
 
 /**
  * The gateway rejects a target URL that points at loopback, a metadata service
@@ -226,6 +228,28 @@ function ServiceDetailPage() {
       setActionError(null)
       setProbeResult(result)
       setProbeRanAt(Date.now())
+
+      // The probe just observed this service's build, and the stored-health
+      // query below is where the screen renders it. Writing the observation
+      // into that cache entry puts it on screen immediately; the invalidation
+      // in `refreshAll` then re-reads the same values from the server. Only
+      // the two build fields are written, because the probe result does not
+      // decide what the database now holds as the health status.
+      const detail = service ? result.details?.[service.name] : undefined
+      if (detail) {
+        queryClient.setQueryData<ServiceHealthStatusResponse>(
+          ['admin-service-health', serviceId],
+          (previous) =>
+            previous
+              ? {
+                  ...previous,
+                  upstream_build: detail.upstream_build ?? null,
+                  build_observed_at: detail.build_observed_at ?? null,
+                }
+              : previous
+        )
+      }
+
       await refreshAll()
     },
     onError: (error: unknown) => {
@@ -528,6 +552,28 @@ function ServiceDetailPage() {
                 <p className="definition-term">등록 활성 여부</p>
                 <p className="definition-value">{storedHealth.is_active ? '활성' : '비활성'}</p>
               </div>
+            </div>
+
+            <div className="spaced-top-lg">
+              <p className="subsection-title">업스트림 빌드</p>
+              {hasAnyBuildFact(storedHealth.upstream_build) ? (
+                <>
+                  <p className="detail spaced-bottom">
+                    마지막 상태 검사가 이 서비스의 <span className="mono">/health</span> 응답에서
+                    읽어 둔 값입니다. 관측 시각{' '}
+                    {formatKst(storedHealth.build_observed_at, '기록 없음')}. 게이트웨이는 이 값을
+                    데이터베이스에 저장하지 않고 프로세스 안에만 두기 때문에, 등록부를 다시
+                    적재하거나 게이트웨이가 다시 시작하면 다음 검사 전까지 비어 있습니다.
+                  </p>
+                  <BuildFactsList build={storedHealth.upstream_build} now={now} />
+                </>
+              ) : (
+                <p>
+                  이 서비스는 빌드 정보를 보고하지 않거나 아직 프로브하지 않았습니다. 위의 전체
+                  서비스 상태 검사를 실행하면 다시 읽어 오며, 그래도 비어 있다면 대상 서비스의{' '}
+                  <span className="mono">/health</span> 응답에 빌드 정보가 없는 것입니다.
+                </p>
+              )}
             </div>
           </div>
         )}
