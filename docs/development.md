@@ -48,6 +48,36 @@ cd admin   # 또는 client
 npm run build
 ```
 
+## 관리자 콘솔 스모크 시험
+
+`admin/`에는 vitest로 실행하는 단위 시험과 별개로, Playwright로 실행하는 스모크 시험이 `admin/e2e/` 아래에 있습니다. 이 시험은 개발 서버가 아니라 빌드 결과물을 Chromium으로 띄우고, 게이트웨이를 모사하는 `admin/e2e/mock-gateway.mjs`를 상대로 화면을 확인합니다. 따라서 Bifrost와 Bidar를 실행하지 않아도 되며, 처음 실행할 때 브라우저를 한 번 내려받아야 합니다.
+
+```bash
+cd admin
+npm ci
+npx playwright install --with-deps chromium   # 처음 한 번만 실행합니다
+npm run test:e2e
+```
+
+`npm run test:e2e`는 목 게이트웨이와 Vite 미리 보기 서버를 함께 띄운 다음 시험을 실행하고, 끝나면 두 서버를 모두 내립니다. 미리 보기 서버는 `VITE_API_BASE_URL`과 `VITE_ADMIN_API_BASE_URL`에 목 서버 주소를 넣어서 다시 빌드한 결과를 제공합니다. `VITE_` 값은 빌드 시점에 번들 안으로 들어가기 때문에 빌드가 끝난 뒤에는 주소를 바꿀 수 없으며, 이때 만든 결과물은 `admin/dist/`가 아니라 `admin/dist-e2e/`에 씁니다. 배포에 사용하는 `dist/`가 목 서버를 가리키는 번들로 바뀌지 않게 하려는 조치입니다.
+
+포트를 바꾸려면 `E2E_MOCK_PORT`와 `E2E_PREVIEW_PORT` 환경 변수를 지정합니다. 기본값은 각각 4599와 4173입니다.
+
+```bash
+E2E_PREVIEW_PORT=4273 npm run test:e2e
+```
+
+단일 시험만 실행하거나 브라우저 창을 띄워서 확인하려면 Playwright의 인자를 그대로 넘깁니다.
+
+```bash
+npm run test:e2e -- e2e/services.spec.ts        # 한 파일만 실행합니다
+npm run test:e2e -- --headed --debug            # 브라우저를 띄우고 단계별로 확인합니다
+```
+
+스크린샷과 트레이스는 실패한 시험에만 남기며, `admin/e2e-results/`에 저장합니다. 성공한 실행은 스크린샷과 트레이스를 남기지 않습니다. 트레이스는 `npx playwright show-trace e2e-results/<시험 이름>/trace.zip`으로 열어 볼 수 있습니다.
+
+CI에서는 `.github/workflows/build.yml`의 admin 작업이 빌드 결과를 업로드한 다음 Chromium을 설치하고 같은 명령을 실행합니다. 확인하는 시나리오와 목 게이트웨이가 재현하는 응답 형식은 [관리자 콘솔](admin-console.md) 문서의 스모크 시험 절에 정리해 두었습니다.
+
 ## 알려진 제한과 후속 과제
 
 - 서비스 화면에는 등록 기능만 있고, 등록한 서비스를 수정하거나 삭제하는 UI는 아직 없습니다.

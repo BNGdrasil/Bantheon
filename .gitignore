@@ -12,6 +12,15 @@ dist
 dist-ssr
 *.local
 
+# Playwright: the end-to-end build, its report, and the screenshots and
+# traces a failed run leaves behind.
+dist-e2e
+e2e-results/
+playwright-report/
+blob-report/
+test-results/
+playwright/.cache/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

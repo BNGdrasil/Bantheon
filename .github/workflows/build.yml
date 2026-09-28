@@ -62,3 +62,33 @@ jobs:
         path: ${{ matrix.app }}/dist/
         retention-days: 30
         if-no-files-found: error
+
+    # The smoke test drives the built bundle in a browser against a local mock
+    # gateway, so only the browser has to be fetched here. Chromium alone: the
+    # suite declares no other project, and installing the rest would add
+    # minutes for engines nothing runs on.
+    - name: Install Playwright chromium (${{ matrix.app }})
+      if: matrix.app == 'admin'
+      working-directory: ./${{ matrix.app }}
+      run: npx playwright install --with-deps chromium
+
+    # The suite rebuilds the console into dist-e2e/ with the mock addresses
+    # injected, which is why it runs after the artifact above has been
+    # uploaded: the dist/ that ships is never the one pointing at a mock.
+    - name: End-to-end smoke test (${{ matrix.app }})
+      if: matrix.app == 'admin'
+      working-directory: ./${{ matrix.app }}
+      run: npm run test:e2e
+
+    # Screenshots and traces are only written for a test that failed, so this
+    # step has nothing to collect after a green run and is skipped entirely.
+    - name: Upload e2e diagnostics (${{ matrix.app }})
+      if: failure() && matrix.app == 'admin'
+      uses: actions/upload-artifact@v6
+      with:
+        name: admin-e2e-report-${{ github.sha }}
+        path: |
+          admin/playwright-report/
+          admin/e2e-results/
+        retention-days: 7
+        if-no-files-found: ignore
