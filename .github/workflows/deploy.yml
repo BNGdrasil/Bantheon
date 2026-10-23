@@ -141,7 +141,7 @@ jobs:
         cat dist/release.json
 
     - name: Upload build artifacts (${{ matrix.app }})
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ matrix.app }}-dist-${{ needs.select.outputs.sha }}
         path: ${{ matrix.app }}/dist/
