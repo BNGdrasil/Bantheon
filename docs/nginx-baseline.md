@@ -130,6 +130,10 @@ server 레벨 선언은 그대로 두고 조각 include로 바꾸었으며, `add
 
 `docker-compose.yml`의 nginx 서비스에 `./nginx/snippets:/etc/nginx/snippets:ro`를 추가했습니다. 이 mount가 없으면 include 대상 파일을 찾지 못해 컨테이너가 기동하지 않습니다.
 
+### 3.10 vasthorizon vhost 추가
+
+기준선을 병합한 뒤에 `vasthorizon.bnbong.com` vhost를 :80과 :443 한 쌍으로 추가했습니다. 구조는 overlock과 같아서 정적 파일을 root로 제공하고 `/api/`만 VM2의 `upstream vasthorizon_server`(`10.0.1.60:8020`)로 프록시하지만, 세 가지 점이 다릅니다. 첫째, 정적 파일은 VastHorizon 저장소가 소유하며 VM1의 `/opt/bnbong/vasthorizon/web`에 놓인 결과물을 읽기 전용으로 mount합니다. 둘째, LLM을 부르는 API는 응답까지 수십 초가 걸리기 때문에 `/api/`의 `proxy_read_timeout`을 120초로 늘렸습니다. Nginx는 한 블록 안에서 `proxy_read_timeout`이 두 번 나오면 뒤의 값으로 덮어쓰지 않고 중복 오류를 내기 때문에, 이 location들은 `proxy-common-cf.conf`를 include하지 않고 같은 헤더와 timeout을 직접 적었습니다. 셋째, `/api/ask/stream`은 SSE로 진행 상황을 계속 보내므로 `proxy_buffering`을 끄고 `proxy_read_timeout`을 300초로 두었습니다. 이 timeout은 응답 전체가 아니라 이벤트 사이의 간격에 적용됩니다. 화면 파일은 이름에 해시가 없으므로 `index.html`과 js, css는 매번 재검증하고, `data/`와 `vendor/` 아래의 파일만 7일 동안 캐시합니다.
+
 ## 4. 반영하지 않은 것
 
 아래 항목은 개선 여지가 있다고 판단했지만 이번 기준선에는 넣지 않았습니다.
@@ -193,7 +197,7 @@ nginx: configuration file /etc/nginx/nginx.conf test is successful
 5. `docker-compose.yml`에 snippets mount를 반영하고 `docker compose up -d`로 컨테이너를 재생성합니다. mount 목록이 바뀌었기 때문에 `reload`만으로는 반영되지 않습니다.
 6. 컨테이너 안에서 `docker compose exec nginx nginx -t`로 문법을 다시 검사합니다. 3번은 파일 내용을, 이 단계는 실제 mount가 연결된 상태를 확인합니다.
 7. 검사를 통과하면 `docker compose exec nginx nginx -s reload`로 적용합니다.
-8. 여섯 개 도메인(`bnbong.com`, `api`, `admin`, `monitoring`, `ambiw`, `overlock`)에 대해 HTTP와 HTTPS 응답, SPA 경로 직접 접근, 존재하지 않는 정적 파일의 404, Grafana WebSocket 연결, `Cache-Control` 헤더를 확인합니다. `dashboard.bnbong.com`도 계속 응답하는지 함께 확인합니다.
+8. 일곱 개 도메인(`bnbong.com`, `api`, `admin`, `monitoring`, `ambiw`, `overlock`, `vasthorizon`)에 대해 HTTP와 HTTPS 응답, SPA 경로 직접 접근, 존재하지 않는 정적 파일의 404, Grafana WebSocket 연결, `Cache-Control` 헤더를 확인합니다. `dashboard.bnbong.com`도 계속 응답하는지 함께 확인합니다.
 
    이 확인은 VM1 안에서 수행해야 하며, 공개 URL을 밖에서 호출한 결과로 판정하면 안 됩니다. `--resolve`로 이름 해석을 루프백에 고정하면 Cloudflare를 거치지 않고 Nginx에 직접 요청할 수 있습니다. 인증서가 Cloudflare origin certificate라서 공개 CA 체인으로는 검증되지 않으므로 `-k`를 함께 씁니다.
 

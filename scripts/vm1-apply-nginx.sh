@@ -329,7 +329,7 @@ cmd_apply() {
     fi
 
     # compose와 선검증이 모두 아래 경로를 mount하므로 존재만 보장한다. ambiw와
-    # overlock의 내용은 다른 저장소가 소유하므로 여기에서 건드리지 않는다.
+    # overlock, vasthorizon의 내용은 다른 저장소가 소유하므로 여기에서 건드리지 않는다.
     mkdir -p \
         "$BNBONG_ROOT/nginx/snippets" \
         "$BNBONG_ROOT/client/dist" \
@@ -337,6 +337,7 @@ cmd_apply() {
         "$BNBONG_ROOT/playground/dist" \
         "$BNBONG_ROOT/ambiw" \
         "$BNBONG_ROOT/overlock" \
+        "$BNBONG_ROOT/vasthorizon/web" \
         "$RELEASES_DIR"
 
     # -----------------------------------------------------------------------
@@ -363,6 +364,7 @@ cmd_apply() {
         -v "$BNBONG_ROOT/playground/dist":/usr/share/nginx/html/playground:ro \
         -v "$BNBONG_ROOT/ambiw":/usr/share/nginx/html/ambiw:ro \
         -v "$BNBONG_ROOT/overlock":/usr/share/nginx/html/overlock:ro \
+        -v "$BNBONG_ROOT/vasthorizon/web":/usr/share/nginx/html/vasthorizon:ro \
         -v "$SSL_DIR":/etc/ssl/cloudflare:ro \
         "$NGINX_IMAGE" nginx -t
     log "  선검증을 통과했습니다."

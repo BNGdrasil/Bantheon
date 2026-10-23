@@ -19,6 +19,8 @@ services:
       - ./admin/dist:/usr/share/nginx/html/bifrost-admin:ro
       - /opt/bnbong/ambiw:/usr/share/nginx/html/ambiw:ro
       - /opt/bnbong/overlock:/usr/share/nginx/html/overlock:ro
+      # Static web owned by the VastHorizon repository (API runs on VM2).
+      - /opt/bnbong/vasthorizon/web:/usr/share/nginx/html/vasthorizon:ro
       - /etc/ssl/cloudflare:/etc/ssl/cloudflare:ro
     restart: unless-stopped
     networks:
